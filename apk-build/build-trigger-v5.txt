@@ -1,0 +1,1 @@
+Trigger Compose BOM API 36 compatible build.
