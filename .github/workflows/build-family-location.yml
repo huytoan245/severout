@@ -43,9 +43,24 @@ jobs:
           sed -i 's/compileSdk = 37/compileSdk = 36/g' appsrc/parent-app/build.gradle.kts appsrc/child-app/build.gradle.kts
           sed -i '/id("org.jetbrains.kotlin.android")/d' appsrc/parent-app/build.gradle.kts appsrc/child-app/build.gradle.kts
           sed -i '/kotlinOptions { jvmTarget = "17" }/d' appsrc/parent-app/build.gradle.kts appsrc/child-app/build.gradle.kts
-      - name: Unit tests
+          cat >> appsrc/core/build.gradle.kts <<'EOF'
+
+          tasks.register<JavaExec>("coreSelfCheck") {
+              group = "verification"
+              classpath = sourceSets["test"].runtimeClasspath
+              mainClass.set("com.family.core.CoreSelfTestKt")
+              dependsOn("testClasses")
+          }
+          tasks.register<JavaExec>("scenarioCheck") {
+              group = "verification"
+              classpath = sourceSets["test"].runtimeClasspath
+              mainClass.set("com.family.core.ScenarioTestKt")
+              dependsOn("testClasses")
+          }
+          EOF
+      - name: Core logic checks
         working-directory: appsrc
-        run: gradle :core:test --stacktrace
+        run: gradle :core:coreSelfCheck :core:scenarioCheck --stacktrace
       - name: Build Parent and Child debug APKs
         working-directory: appsrc
         run: gradle :parent-app:assembleDebug :child-app:assembleDebug --stacktrace
