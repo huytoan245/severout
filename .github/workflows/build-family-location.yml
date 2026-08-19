@@ -31,7 +31,7 @@ jobs:
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '9.5.0'
-      - name: Restore project source
+      - name: Restore and migrate project source
         shell: bash
         run: |
           cat apk-build/part*.txt > source.b64
@@ -41,6 +41,8 @@ jobs:
           test -f appsrc/parent-app/google-services.json
           test -f appsrc/child-app/google-services.json
           sed -i 's/compileSdk = 37/compileSdk = 36/g' appsrc/parent-app/build.gradle.kts appsrc/child-app/build.gradle.kts
+          sed -i '/id("org.jetbrains.kotlin.android")/d' appsrc/parent-app/build.gradle.kts appsrc/child-app/build.gradle.kts
+          sed -i '/kotlinOptions { jvmTarget = "17" }/d' appsrc/parent-app/build.gradle.kts appsrc/child-app/build.gradle.kts
       - name: Unit tests
         working-directory: appsrc
         run: gradle :core:test --stacktrace
