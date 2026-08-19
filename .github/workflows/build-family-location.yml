@@ -44,6 +44,7 @@ jobs:
           sed -i 's/compose-bom:2026.08.00/compose-bom:2026.06.00/g' appsrc/parent-app/build.gradle.kts appsrc/child-app/build.gradle.kts
           sed -i '/id("org.jetbrains.kotlin.android")/d' appsrc/parent-app/build.gradle.kts appsrc/child-app/build.gradle.kts
           sed -i '/kotlinOptions { jvmTarget = "17" }/d' appsrc/parent-app/build.gradle.kts appsrc/child-app/build.gradle.kts
+          cp ci-patches/ChildMainActivity.kt appsrc/child-app/src/main/java/com/family/child/MainActivity.kt
           cat >> appsrc/core/build.gradle.kts <<'EOF'
 
           tasks.register<JavaExec>("coreSelfCheck") {
