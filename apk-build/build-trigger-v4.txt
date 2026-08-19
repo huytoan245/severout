@@ -1,0 +1,1 @@
+Trigger explicit core self-check build.
