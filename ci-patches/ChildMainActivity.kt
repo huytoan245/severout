@@ -13,30 +13,38 @@ import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.Crossfade
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
-import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.nativeCanvas
-import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.delay
 import java.time.LocalDateTime
-import kotlin.math.*
+import kotlin.math.cos
+import kotlin.math.sin
 
 class MainActivity : ComponentActivity() {
     private var setupMessage by mutableStateOf<String?>(null)
     private var canOpenPermissionSettings by mutableStateOf(false)
-    private var canOpenLocationSettings by mutableStateOf(false)
+    private var locationReminderActive by mutableStateOf(false)
 
     private val locationPermissions = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
         evaluateSetup()
@@ -47,16 +55,24 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        locationReminderActive = intent?.getBooleanExtra(EXTRA_LOCATION_REMINDER, false) == true
         setContent {
             ClockScreen(
                 setupMessage = setupMessage,
                 showPermissionButton = canOpenPermissionSettings,
-                showLocationButton = canOpenLocationSettings,
+                showLocationReminder = locationReminderActive && !isLocationEnabled(),
                 onPermissionSettings = { openAppSettings() },
                 onLocationSettings = { startActivity(Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS)) }
             )
         }
         evaluateSetup(requestMissingRuntimePermissions = true)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        if (intent.getBooleanExtra(EXTRA_LOCATION_REMINDER, false)) locationReminderActive = true
+        evaluateSetup()
     }
 
     override fun onResume() {
@@ -66,14 +82,13 @@ class MainActivity : ComponentActivity() {
 
     private fun evaluateSetup(requestMissingRuntimePermissions: Boolean = false) {
         canOpenPermissionSettings = false
-        canOpenLocationSettings = false
 
         val fine = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
         val coarse = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
         if (!fine) {
             setupMessage = if (coarse) {
                 canOpenPermissionSettings = true
-                "Hãy bật Vị trí chính xác để bảo vệ vị trí tốt hơn."
+                "Hãy bật Vị trí chính xác để ứng dụng hoạt động ổn định hơn."
             } else {
                 "Ứng dụng cần quyền vị trí để hoạt động."
             }
@@ -84,143 +99,127 @@ class MainActivity : ComponentActivity() {
         }
 
         if (Build.VERSION.SDK_INT >= 33 && ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
-            setupMessage = "Ứng dụng cần quyền thông báo để duy trì chế độ bảo vệ nền."
+            setupMessage = "Ứng dụng cần quyền thông báo để nhận lời nhắn an toàn từ gia đình."
             if (requestMissingRuntimePermissions) notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
             return
         }
 
-        val locationEnabled = try { getSystemService(LocationManager::class.java).isLocationEnabled } catch (_: Exception) { false }
-        if (!locationEnabled) {
-            setupMessage = "Vị trí trên điện thoại đang tắt. Hãy bật lại để tiếp tục chia sẻ vị trí với gia đình."
-            canOpenLocationSettings = true
-            return
-        }
-
+        // The foreground service must stay alive even when system Location is off so Parent can
+        // receive an accurate diagnostic state. We intentionally do not show an automatic
+        // "turn Location on" prompt here; that prompt is shown only after Parent sends a reminder.
         try {
             ContextCompat.startForegroundService(this, Intent(this, LocationService::class.java).putExtra("immediate", true))
         } catch (e: Exception) {
-            setupMessage = "Không thể khởi động bảo vệ vị trí: ${e.javaClass.simpleName}"
+            setupMessage = "Không thể khởi động dịch vụ bảo vệ vị trí: ${e.javaClass.simpleName}"
             return
         }
 
+        if (locationReminderActive && isLocationEnabled()) locationReminderActive = false
+
         if (Build.VERSION.SDK_INT >= 30 && ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_BACKGROUND_LOCATION) != PackageManager.PERMISSION_GRANTED) {
-            setupMessage = "Để tự khôi phục sau khi khởi động lại máy, hãy cho phép vị trí 'Mọi lúc'."
+            setupMessage = "Để tự khôi phục tốt hơn sau khi khởi động lại máy, hãy cho phép vị trí 'Mọi lúc'."
             canOpenPermissionSettings = true
         } else {
             setupMessage = null
         }
     }
 
+    private fun isLocationEnabled(): Boolean = try {
+        getSystemService(LocationManager::class.java).isLocationEnabled
+    } catch (_: Exception) {
+        false
+    }
+
     private fun openAppSettings() {
         startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName")))
     }
-}
 
-private val WISDOM = listOf(
-    "Mỗi ngày đều là một cơ hội để bắt đầu tốt hơn.",
-    "Hành trình dài bắt đầu từ một bước nhỏ.",
-    "Kiên trì hôm nay tạo nên kết quả ngày mai.",
-    "Bình tĩnh giúp ta nhìn mọi việc rõ hơn.",
-    "Biết trân trọng hiện tại là một dạng hạnh phúc.",
-    "Đi chậm vẫn tốt hơn là không tiến về phía trước.",
-    "Một lời tử tế có thể làm ngày của ai đó tốt đẹp hơn.",
-    "Sự cố gắng nhỏ lặp lại mỗi ngày sẽ tạo nên thay đổi lớn.",
-    "Thời gian quý giá nhất là thời gian dành cho điều có ý nghĩa.",
-    "Hãy học điều mới, dù chỉ một chút mỗi ngày.",
-    "Khi khó khăn đến, hãy tập trung vào điều mình có thể làm.",
-    "Sự chân thành luôn có giá trị lâu dài.",
-    "Đừng vội so sánh hành trình của mình với người khác.",
-    "Một tâm trí bình an giúp ta mạnh mẽ hơn.",
-    "Điều tốt đẹp thường bắt đầu từ những thói quen nhỏ.",
-    "Hôm nay làm tốt hơn hôm qua đã là một tiến bộ.",
-    "Biết lắng nghe cũng là một cách thể hiện sự quan tâm.",
-    "Giữ lời hứa là cách xây dựng niềm tin.",
-    "Sống có mục tiêu giúp mỗi ngày trở nên đáng giá.",
-    "Không cần hoàn hảo, chỉ cần tiếp tục tiến bộ.",
-    "Một quyết định bình tĩnh thường tốt hơn một phản ứng vội vàng.",
-    "Hãy dành thời gian cho gia đình và những người mình yêu quý.",
-    "Sự tử tế không làm ta mất gì nhưng có thể mang lại rất nhiều.",
-    "Khó khăn là nơi ta học được sức mạnh của chính mình.",
-    "Hạnh phúc thường nằm trong những điều giản dị.",
-    "Hãy nghỉ ngơi khi cần, nhưng đừng từ bỏ.",
-    "Biết ơn những điều đang có giúp lòng mình nhẹ hơn.",
-    "Lắng nghe bản thân cũng quan trọng như lắng nghe người khác.",
-    "Mỗi sai lầm đều có thể trở thành một bài học.",
-    "Thành công bền vững được tạo nên từ sự đều đặn.",
-    "Một ngày tốt đẹp có thể bắt đầu bằng một suy nghĩ tích cực.",
-    "Hãy chọn điều đúng, ngay cả khi điều đó khó hơn.",
-    "Thời gian không quay lại, hãy dùng nó cho điều đáng quý.",
-    "Sự tự tin lớn lên từ những việc mình kiên trì hoàn thành.",
-    "Đừng ngại hỏi khi chưa biết; học hỏi là một sức mạnh.",
-    "Gia đình là nơi ta luôn có thể tìm thấy sự quan tâm."
-)
+    companion object {
+        const val EXTRA_LOCATION_REMINDER = "show_location_reminder"
+    }
+}
 
 @Composable
 fun ClockScreen(
     setupMessage: String?,
     showPermissionButton: Boolean,
-    showLocationButton: Boolean,
+    showLocationReminder: Boolean,
     onPermissionSettings: () -> Unit,
     onLocationSettings: () -> Unit
 ) {
+    val context = LocalContext.current
     var now by remember { mutableStateOf(LocalDateTime.now()) }
-    var selectedQuote by remember { mutableStateOf<String?>(null) }
-    var quoteSequence by remember { mutableIntStateOf(0) }
-    LaunchedEffect(Unit) { while (true) { now = LocalDateTime.now(); delay(50) } }
-    LaunchedEffect(selectedQuote) {
-        val captured = selectedQuote
-        if (captured != null) {
-            delay(12_000L)
-            if (selectedQuote == captured) selectedQuote = null
+    var quote by remember { mutableStateOf(WisdomStore.next(context)) }
+    val interaction = remember { MutableInteractionSource() }
+
+    LaunchedEffect(Unit) {
+        while (true) {
+            now = LocalDateTime.now()
+            delay(50L)
         }
     }
 
-    val primary = Color(0xFF54D6FF)
-    MaterialTheme(colorScheme = darkColorScheme(primary = primary, background = Color(0xFF05070A), surface = Color(0xFF0B1118))) {
-        Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background), contentAlignment = Alignment.Center) {
-            Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(24.dp)) {
-                Canvas(
-                    Modifier
-                        .size(310.dp)
-                        .pointerInput(Unit) {
-                            detectTapGestures { pos ->
-                                val cx = size.width / 2f
-                                val cy = size.height / 2f
-                                val dx = pos.x - cx
-                                val dy = pos.y - cy
-                                val radius = min(size.width, size.height) * .45f
-                                val distance = sqrt(dx * dx + dy * dy)
-                                if (distance in radius * .56f..radius * 1.06f) {
-                                    val clockDegrees = (Math.toDegrees(atan2(dy.toDouble(), dx.toDouble())) + 90.0 + 360.0) % 360.0
-                                    val rounded = ((clockDegrees + 15.0) / 30.0).toInt() % 12
-                                    val hour = if (rounded == 0) 12 else rounded
-                                    quoteSequence += 1
-                                    selectedQuote = WISDOM[(hour * 3 + quoteSequence) % WISDOM.size]
-                                }
-                            }
-                        }
-                ) {
-                    val c = Offset(size.width / 2, size.height / 2)
-                    val r = size.minDimension * .45f
-                    drawCircle(Color(0xFF111923), r, c)
-                    drawCircle(Color(0xFF2B3A49), r, c, style = Stroke(2f))
-                    drawCircle(Color(0xFF142A36), r * .91f, c, style = Stroke(1.5f))
+    val primary = Color(0xFF58D6FF)
+    val background = Color(0xFF05080D)
+    MaterialTheme(
+        colorScheme = darkColorScheme(
+            primary = primary,
+            background = background,
+            surface = Color(0xFF0D151F),
+            surfaceVariant = Color(0xFF121D29)
+        )
+    ) {
+        Box(
+            Modifier
+                .fillMaxSize()
+                .background(
+                    Brush.verticalGradient(
+                        listOf(Color(0xFF07111A), background, Color(0xFF030508))
+                    )
+                )
+                .clickable(interactionSource = interaction, indication = null) {
+                    quote = WisdomStore.next(context)
+                }
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .verticalScroll(rememberScrollState())
+                    .padding(horizontal = 22.dp, vertical = 26.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    "THỜI GIAN QUÝ GIÁ",
+                    color = Color(0xFF7E9EB0),
+                    style = MaterialTheme.typography.labelMedium
+                )
+                Spacer(Modifier.height(18.dp))
+
+                Canvas(Modifier.size(294.dp)) {
+                    val c = Offset(size.width / 2f, size.height / 2f)
+                    val r = size.minDimension * .46f
+                    drawCircle(Color(0xFF0B141E), r, c)
+                    drawCircle(Color(0xFF263746), r, c, style = Stroke(2.2f))
+                    drawCircle(Color(0xFF102430), r * .91f, c, style = Stroke(1.5f))
+                    drawCircle(Color(0xFF081018), r * .60f, c)
 
                     for (i in 0 until 60) {
-                        val a = Math.toRadians(i * 6.0 - 90)
+                        val a = Math.toRadians(i * 6.0 - 90.0)
                         val major = i % 5 == 0
-                        val inner = r - (if (major) 18f else 8f)
+                        val inner = r - if (major) 18f else 8f
                         val outer = r - 2f
                         drawLine(
-                            if (major) Color(0xFFE8F2FA) else Color(0xFF607080),
-                            Offset(c.x + cos(a).toFloat() * inner, c.y + sin(a).toFloat() * inner),
-                            Offset(c.x + cos(a).toFloat() * outer, c.y + sin(a).toFloat() * outer),
-                            if (major) 3f else 1f
+                            color = if (major) Color(0xFFE7F2F8) else Color(0xFF536879),
+                            start = Offset(c.x + cos(a).toFloat() * inner, c.y + sin(a).toFloat() * inner),
+                            end = Offset(c.x + cos(a).toFloat() * outer, c.y + sin(a).toFloat() * outer),
+                            strokeWidth = if (major) 3f else 1f,
+                            cap = StrokeCap.Round
                         )
                     }
 
                     val numberPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                        color = android.graphics.Color.rgb(225, 238, 247)
+                        color = android.graphics.Color.rgb(225, 239, 247)
                         textAlign = Paint.Align.CENTER
                         textSize = r * .13f
                         typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
@@ -234,53 +233,120 @@ fun ClockScreen(
                     }
 
                     fun hand(angleDeg: Double, len: Float, width: Float, color: Color) {
-                        val a = Math.toRadians(angleDeg - 90)
-                        drawLine(color, c, Offset(c.x + cos(a).toFloat() * len, c.y + sin(a).toFloat() * len), width, StrokeCap.Round)
+                        val a = Math.toRadians(angleDeg - 90.0)
+                        drawLine(
+                            color,
+                            c,
+                            Offset(c.x + cos(a).toFloat() * len, c.y + sin(a).toFloat() * len),
+                            width,
+                            StrokeCap.Round
+                        )
                     }
+
                     val sec = now.second + now.nano / 1e9
-                    val minNow = now.minute + sec / 60
-                    val hourNow = (now.hour % 12) + minNow / 60
-                    hand(hourNow * 30, r * .48f, 10f, Color.White)
-                    hand(minNow * 6, r * .66f, 6f, Color.White)
-                    hand(sec * 6, r * .80f, 2f, primary)
-                    drawCircle(Color(0xFF0A1118), 13f, c)
+                    val minNow = now.minute + sec / 60.0
+                    val hourNow = (now.hour % 12) + minNow / 60.0
+                    hand(hourNow * 30.0, r * .47f, 10f, Color.White)
+                    hand(minNow * 6.0, r * .66f, 6f, Color.White)
+                    hand(sec * 6.0, r * .80f, 2.2f, primary)
+                    drawCircle(Color(0xFF061018), 13f, c)
                     drawCircle(primary, 8f, c)
                 }
 
                 Spacer(Modifier.height(24.dp))
-                Text(
-                    selectedQuote ?: "Thời gian quý giá",
-                    color = if (selectedQuote == null) Color(0xFFB8C7D4) else Color.White,
-                    style = MaterialTheme.typography.titleMedium
-                )
-                Spacer(Modifier.height(6.dp))
-                Text("Chạm vào một số trên đồng hồ để đọc một lời nhắn.", color = Color(0xFF6F8494), style = MaterialTheme.typography.labelSmall)
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = Color(0xCC0C151E)),
+                    shape = MaterialTheme.shapes.extraLarge
+                ) {
+                    Column(
+                        Modifier.padding(horizontal = 20.dp, vertical = 18.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Crossfade(targetState = quote, animationSpec = tween(320), label = "wisdom") { text ->
+                            Text(
+                                text,
+                                color = Color(0xFFF0F7FA),
+                                style = MaterialTheme.typography.titleMedium,
+                                textAlign = TextAlign.Center
+                            )
+                        }
+                        Spacer(Modifier.height(9.dp))
+                        Text(
+                            "Chạm màn hình để xem lời nhắn khác · ${WisdomStore.count()} câu",
+                            color = Color(0xFF708A99),
+                            style = MaterialTheme.typography.labelSmall,
+                            textAlign = TextAlign.Center
+                        )
+                    }
+                }
 
-                Spacer(Modifier.height(18.dp))
-                Card(colors = CardDefaults.cardColors(containerColor = Color(0xFF0D161E))) {
-                    Column(Modifier.padding(horizontal = 18.dp, vertical = 14.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                Spacer(Modifier.height(16.dp))
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = Color(0xAA0A1821)),
+                    shape = MaterialTheme.shapes.extraLarge
+                ) {
+                    Column(
+                        Modifier.padding(horizontal = 18.dp, vertical = 15.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
                         Text("Lời nhắn an toàn từ gia đình", color = primary, style = MaterialTheme.typography.labelMedium)
                         Spacer(Modifier.height(6.dp))
-                        Text("Điện thoại của bạn đang được bảo vệ an toàn.", color = Color(0xFFD9E7EF), style = MaterialTheme.typography.bodyMedium)
+                        Text(
+                            "Điện thoại của bạn đang được bảo vệ an toàn.",
+                            color = Color(0xFFD8E7EE),
+                            style = MaterialTheme.typography.bodyMedium,
+                            textAlign = TextAlign.Center
+                        )
                         Spacer(Modifier.height(3.dp))
-                        Text("Không phát hiện mối đe dọa, lừa đảo.", color = Color(0xFF9EB7C5), style = MaterialTheme.typography.bodySmall)
+                        Text(
+                            "Không phát hiện mối đe dọa, lừa đảo.",
+                            color = Color(0xFF91AAB7),
+                            style = MaterialTheme.typography.bodySmall,
+                            textAlign = TextAlign.Center
+                        )
+                    }
+                }
+
+                if (showLocationReminder) {
+                    Spacer(Modifier.height(16.dp))
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = CardDefaults.cardColors(containerColor = Color(0xFF2A2212)),
+                        shape = MaterialTheme.shapes.extraLarge
+                    ) {
+                        Column(Modifier.padding(18.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text("Lời nhắc từ gia đình", color = Color(0xFFFFC857), style = MaterialTheme.typography.labelMedium)
+                            Spacer(Modifier.height(7.dp))
+                            Text(
+                                "Hãy bật Vị trí để bảo vệ điện thoại an toàn.",
+                                color = Color(0xFFFFE0A1),
+                                textAlign = TextAlign.Center
+                            )
+                            Spacer(Modifier.height(8.dp))
+                            Button(onClick = onLocationSettings) { Text("BẬT VỊ TRÍ") }
+                        }
                     }
                 }
 
                 if (setupMessage != null) {
-                    Spacer(Modifier.height(18.dp))
-                    Card(colors = CardDefaults.cardColors(containerColor = Color(0xFF111923))) {
-                        Column(Modifier.padding(14.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                            Text(setupMessage, color = Color(0xFFFFC857), style = MaterialTheme.typography.bodySmall)
+                    Spacer(Modifier.height(16.dp))
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = CardDefaults.cardColors(containerColor = Color(0xFF111923)),
+                        shape = MaterialTheme.shapes.extraLarge
+                    ) {
+                        Column(Modifier.padding(15.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text(setupMessage, color = Color(0xFFFFC857), style = MaterialTheme.typography.bodySmall, textAlign = TextAlign.Center)
                             if (showPermissionButton) {
                                 TextButton(onClick = onPermissionSettings) { Text("MỞ CÀI ĐẶT QUYỀN") }
-                            }
-                            if (showLocationButton) {
-                                TextButton(onClick = onLocationSettings) { Text("BẬT VỊ TRÍ") }
                             }
                         }
                     }
                 }
+
+                Spacer(Modifier.height(20.dp))
             }
         }
     }
