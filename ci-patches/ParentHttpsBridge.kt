@@ -2,6 +2,7 @@ package com.family.parent
 
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import com.google.firebase.auth.FirebaseAuth
 import org.json.JSONObject
 import java.net.HttpURLConnection
@@ -18,23 +19,44 @@ object ParentHttpsBridge {
     private val executor = Executors.newSingleThreadExecutor()
     private val main = Handler(Looper.getMainLooper())
 
+    @Volatile
+    var lastLatencyMs: Long = -1L
+        private set
+
     data class DeviceState(
         val lastLat: Double? = null,
         val lastLon: Double? = null,
         val accuracy: Double? = null,
         val lastSeen: Long = 0L,
         val heartbeatAt: Long = 0L,
+        val diagnosticAt: Long = 0L,
         val locationEnabled: Boolean? = null,
         val fineLocationGranted: Boolean? = null,
         val backgroundLocationGranted: Boolean? = null,
+        val notificationGranted: Boolean? = null,
         val serviceState: String? = null,
         val status: String? = null,
         val lastError: String? = null,
+        val networkType: String? = null,
+        val networkValidated: Boolean? = null,
+        val networkAt: Long = 0L,
+        val firebaseRealtimeOkAt: Long = 0L,
+        val firebaseWriteOkAt: Long = 0L,
+        val firebaseLatencyMs: Long = 0L,
+        val httpsFallbackOkAt: Long = 0L,
+        val httpsLatencyMs: Long = 0L,
+        val serviceStartedAt: Long = 0L,
+        val appVersion: String? = null,
         val refreshRequestedAt: Long = 0L,
         val refreshAckFor: Long = 0L,
         val refreshCompletedFor: Long = 0L,
         val refreshFailedFor: Long = 0L,
-        val refreshResult: String? = null
+        val refreshResult: String? = null,
+        val locationReminderRequestedAt: Long = 0L,
+        val locationReminderExpiresAt: Long = 0L,
+        val locationReminderAckFor: Long = 0L,
+        val locationReminderAckAt: Long = 0L,
+        val locationReminderResult: String? = null
     )
 
     fun patch(fields: Map<String, Any?>, callback: (Boolean, String?) -> Unit) {
@@ -43,6 +65,7 @@ object ParentHttpsBridge {
                 executor.execute {
                     try {
                         val mask = fields.keys.joinToString("&") { "updateMask.fieldPaths=$it" }
+                        val start = SystemClock.elapsedRealtime()
                         val connection = (URL("$DOC_URL?$mask").openConnection() as HttpURLConnection).apply {
                             requestMethod = "PATCH"
                             connectTimeout = 8_000
@@ -56,6 +79,7 @@ object ParentHttpsBridge {
                         val body = JSONObject().put("fields", jsonFields).toString()
                         connection.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
                         val code = connection.responseCode
+                        lastLatencyMs = (SystemClock.elapsedRealtime() - start).coerceAtLeast(0L)
                         val message = if (code in 200..299) null else readError(connection)
                         connection.disconnect()
                         post { callback(code in 200..299, message ?: if (code in 200..299) null else "HTTP $code") }
@@ -73,6 +97,7 @@ object ParentHttpsBridge {
             onToken = { token ->
                 executor.execute {
                     try {
+                        val start = SystemClock.elapsedRealtime()
                         val connection = (URL(DOC_URL).openConnection() as HttpURLConnection).apply {
                             requestMethod = "GET"
                             connectTimeout = 8_000
@@ -81,6 +106,7 @@ object ParentHttpsBridge {
                             setRequestProperty("Accept", "application/json")
                         }
                         val code = connection.responseCode
+                        lastLatencyMs = (SystemClock.elapsedRealtime() - start).coerceAtLeast(0L)
                         if (code in 200..299) {
                             val body = connection.inputStream.bufferedReader().use { it.readText() }
                             val fields = JSONObject(body).optJSONObject("fields") ?: JSONObject()
@@ -90,17 +116,34 @@ object ParentHttpsBridge {
                                 accuracy = number(fields, "accuracy"),
                                 lastSeen = long(fields, "lastSeen"),
                                 heartbeatAt = long(fields, "heartbeatAt"),
+                                diagnosticAt = long(fields, "diagnosticAt"),
                                 locationEnabled = bool(fields, "locationEnabled"),
                                 fineLocationGranted = bool(fields, "fineLocationGranted"),
                                 backgroundLocationGranted = bool(fields, "backgroundLocationGranted"),
+                                notificationGranted = bool(fields, "notificationGranted"),
                                 serviceState = string(fields, "serviceState"),
                                 status = string(fields, "status"),
                                 lastError = string(fields, "lastError")?.takeIf { it.isNotBlank() },
+                                networkType = string(fields, "networkType"),
+                                networkValidated = bool(fields, "networkValidated"),
+                                networkAt = long(fields, "networkAt"),
+                                firebaseRealtimeOkAt = long(fields, "firebaseRealtimeOkAt"),
+                                firebaseWriteOkAt = long(fields, "firebaseWriteOkAt"),
+                                firebaseLatencyMs = long(fields, "firebaseLatencyMs"),
+                                httpsFallbackOkAt = long(fields, "httpsFallbackOkAt"),
+                                httpsLatencyMs = long(fields, "httpsLatencyMs"),
+                                serviceStartedAt = long(fields, "serviceStartedAt"),
+                                appVersion = string(fields, "appVersion"),
                                 refreshRequestedAt = long(fields, "refreshRequestedAt"),
                                 refreshAckFor = long(fields, "refreshAckFor"),
                                 refreshCompletedFor = long(fields, "refreshCompletedFor"),
                                 refreshFailedFor = long(fields, "refreshFailedFor"),
-                                refreshResult = string(fields, "refreshResult")
+                                refreshResult = string(fields, "refreshResult"),
+                                locationReminderRequestedAt = long(fields, "locationReminderRequestedAt"),
+                                locationReminderExpiresAt = long(fields, "locationReminderExpiresAt"),
+                                locationReminderAckFor = long(fields, "locationReminderAckFor"),
+                                locationReminderAckAt = long(fields, "locationReminderAckAt"),
+                                locationReminderResult = string(fields, "locationReminderResult")
                             )
                             connection.disconnect()
                             post { callback(state, null) }
