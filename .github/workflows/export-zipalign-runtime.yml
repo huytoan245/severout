@@ -1,0 +1,32 @@
+name: Export Android Zipalign Runtime
+
+on:
+  pull_request:
+    branches: [ master ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: android-actions/setup-android@v3
+      - name: Install build tools
+        run: sdkmanager "build-tools;36.0.0"
+      - name: Collect zipalign runtime
+        shell: bash
+        run: |
+          mkdir -p out
+          cp "$ANDROID_HOME/build-tools/36.0.0/zipalign" out/zipalign
+          ldd "$ANDROID_HOME/build-tools/36.0.0/zipalign" || true
+          LIBCPP=$(find "$ANDROID_HOME" /usr/lib /usr/local/lib -name 'libc++.so' -type f 2>/dev/null | head -1 || true)
+          if [ -n "$LIBCPP" ]; then cp "$LIBCPP" out/libc++.so; fi
+          find out -type f -maxdepth 1 -printf '%f %s bytes\n'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-zipalign-runtime
+          path: out/*
+          retention-days: 2

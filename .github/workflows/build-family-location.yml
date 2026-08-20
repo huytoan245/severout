@@ -1,4 +1,4 @@
-name: Build Family Location APKs
+name: Build Family Location Stable APKs
 
 on:
   push:
@@ -17,20 +17,25 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
+
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
+
       - name: Install Android platform
         shell: bash
         run: sdkmanager "platforms;android-36" "build-tools;36.0.0" "platform-tools"
+
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '9.5.0'
+
       - name: Restore and migrate project source
         shell: bash
         run: |
@@ -40,13 +45,33 @@ jobs:
           test -f appsrc/settings.gradle.kts
           test -f appsrc/parent-app/google-services.json
           test -f appsrc/child-app/google-services.json
+
           sed -i 's/compileSdk = 37/compileSdk = 36/g' appsrc/parent-app/build.gradle.kts appsrc/child-app/build.gradle.kts
           sed -i 's/compose-bom:2026.08.00/compose-bom:2026.06.00/g' appsrc/parent-app/build.gradle.kts appsrc/child-app/build.gradle.kts
           sed -i '/id("org.jetbrains.kotlin.android")/d' appsrc/parent-app/build.gradle.kts appsrc/child-app/build.gradle.kts
           sed -i '/kotlinOptions { jvmTarget = "17" }/d' appsrc/parent-app/build.gradle.kts appsrc/child-app/build.gradle.kts
+
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+          for name in ['parent-app/build.gradle.kts','child-app/build.gradle.kts']:
+              p=Path('appsrc')/name
+              s=p.read_text()
+              s=re.sub(r'versionCode\s*=\s*\d+', 'versionCode = 20', s)
+              s=re.sub(r'versionName\s*=\s*"[^"]+"', 'versionName = "2.0.0"', s)
+              p.write_text(s)
+          child=Path('appsrc/child-app/build.gradle.kts')
+          s=child.read_text()
+          if 'androidx.fragment:fragment-ktx:1.8.9' not in s:
+              s += '\n\ndependencies {\n    implementation("androidx.fragment:fragment-ktx:1.8.9")\n}\n'
+          child.write_text(s)
+          PY
+
           cp ci-patches/ChildMainActivity.kt appsrc/child-app/src/main/java/com/family/child/MainActivity.kt
           cp ci-patches/LocationService.kt appsrc/child-app/src/main/java/com/family/child/LocationService.kt
+          cp ci-patches/BootReceiver.kt appsrc/child-app/src/main/java/com/family/child/BootReceiver.kt
           cp ci-patches/ParentMainActivity.kt appsrc/parent-app/src/main/java/com/family/parent/MainActivity.kt
+
           cat >> appsrc/core/build.gradle.kts <<'EOF'
 
           tasks.register<JavaExec>("coreSelfCheck") {
@@ -62,23 +87,41 @@ jobs:
               dependsOn("testClasses")
           }
           EOF
+
+      - name: Validate critical wiring
+        shell: bash
+        run: |
+          grep -q 'ACCESS_BACKGROUND_LOCATION' appsrc/child-app/src/main/AndroidManifest.xml
+          grep -q 'FOREGROUND_SERVICE_LOCATION' appsrc/child-app/src/main/AndroidManifest.xml
+          grep -q 'foregroundServiceType="location"' appsrc/child-app/src/main/AndroidManifest.xml
+          grep -q 'androidx.fragment:fragment-ktx:1.8.9' appsrc/child-app/build.gradle.kts
+          grep -q 'refreshRequestedAt' appsrc/parent-app/src/main/java/com/family/parent/MainActivity.kt
+          grep -q 'refreshCompletedFor' appsrc/child-app/src/main/java/com/family/child/LocationService.kt
+          grep -q 'heartbeatAt' appsrc/child-app/src/main/java/com/family/child/LocationService.kt
+          grep -q 'tile.openstreetmap.org' appsrc/parent-app/src/main/assets/osm_raster_style.json
+
       - name: Core logic checks
         working-directory: appsrc
         run: gradle :core:coreSelfCheck :core:scenarioCheck --stacktrace
-      - name: Build Parent and Child debug APKs
+
+      - name: Build unsigned release APKs
         working-directory: appsrc
-        run: gradle :parent-app:assembleDebug :child-app:assembleDebug --stacktrace
-      - name: Collect APKs
+        run: gradle :parent-app:assembleRelease :child-app:assembleRelease --stacktrace
+
+      - name: Collect release APKs and Android signing tool
         shell: bash
         run: |
-          mkdir -p out
-          cp appsrc/parent-app/build/outputs/apk/debug/parent-app-debug.apk out/Family-Parent-v1.3.apk
-          cp appsrc/child-app/build/outputs/apk/debug/child-app-debug.apk out/Family-Child-v1.3.apk
-          sha256sum out/*.apk | tee out/SHA256SUMS.txt
-      - name: Upload APK artifacts
+          mkdir -p out/signing-tool
+          cp appsrc/parent-app/build/outputs/apk/release/parent-app-release-unsigned.apk out/Family-Parent-v2.0-unsigned.apk
+          cp appsrc/child-app/build/outputs/apk/release/child-app-release-unsigned.apk out/Family-Child-v2.0-unsigned.apk
+          cp "$ANDROID_HOME/build-tools/36.0.0/lib/apksigner.jar" out/signing-tool/apksigner.jar
+          cp "$ANDROID_HOME/build-tools/36.0.0/zipalign" out/signing-tool/zipalign
+          sha256sum out/*.apk | tee out/UNSIGNED-SHA256SUMS.txt
+
+      - name: Upload unsigned stable build
         uses: actions/upload-artifact@v4
         with:
-          name: family-location-apks-v1.3
+          name: family-location-v2.0-unsigned-and-signing-tool
           path: out/*
           if-no-files-found: error
           retention-days: 14

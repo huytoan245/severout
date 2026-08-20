@@ -1,16 +1,15 @@
 package com.family.parent
 
+import android.app.DatePickerDialog
 import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -21,6 +20,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.FirebaseFirestore
+import com.google.firebase.firestore.MetadataChanges
 import com.google.firebase.firestore.SetOptions
 import org.maplibre.android.MapLibre
 import org.maplibre.android.annotations.MarkerOptions
@@ -38,14 +38,16 @@ import java.util.Locale
 private const val CHILD_DOC = "child-01"
 private const val OSM_STYLE = "asset://osm_raster_style.json"
 
-data class UiEvent(val type: String = "", val time: Long = 0, val lat: Double? = null, val lon: Double? = null, val accuracy: Double? = null, val id: String = "")
+data class UiEvent(val type: String = "", val time: Long = 0L, val lat: Double? = null, val lon: Double? = null, val accuracy: Double? = null, val id: String = "")
 data class UiVisit(val title: String, val detail: String, val lat: Double?, val lon: Double?)
 
 class MainActivity : ComponentActivity() {
     private var mapView: MapView? = null
     private var restoredState: Bundle? = null
     override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState); restoredState = savedInstanceState; MapLibre.getInstance(this)
+        super.onCreate(savedInstanceState)
+        restoredState = savedInstanceState
+        MapLibre.getInstance(this)
         setContent { ParentApp(restoredState) { mapView = it } }
     }
     override fun onStart() { super.onStart(); mapView?.onStart() }
@@ -62,7 +64,9 @@ fun ParentApp(savedState: Bundle?, onMapViewCreated: (MapView) -> Unit) {
     var authReady by remember { mutableStateOf(FirebaseAuth.getInstance().currentUser != null) }
     var authError by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(Unit) {
-        if (!authReady) FirebaseAuth.getInstance().signInAnonymously().addOnSuccessListener { authReady = true }.addOnFailureListener { authError = it.message ?: it.javaClass.simpleName }
+        if (!authReady) FirebaseAuth.getInstance().signInAnonymously()
+            .addOnSuccessListener { authReady = true }
+            .addOnFailureListener { authError = it.message ?: it.javaClass.simpleName }
     }
     MaterialTheme(colorScheme = darkColorScheme()) {
         when {
@@ -81,127 +85,224 @@ fun ParentDashboard(savedState: Bundle?, onMapViewCreated: (MapView) -> Unit) {
     var lon by remember { mutableStateOf<Double?>(null) }
     var seen by remember { mutableLongStateOf(0L) }
     var acc by remember { mutableDoubleStateOf(0.0) }
-    var deviceStatus by remember { mutableStateOf("unknown") }
+    var heartbeatAt by remember { mutableLongStateOf(0L) }
     var locationEnabled by remember { mutableStateOf<Boolean?>(null) }
+    var fineLocationGranted by remember { mutableStateOf<Boolean?>(null) }
+    var backgroundLocationGranted by remember { mutableStateOf<Boolean?>(null) }
+    var serviceState by remember { mutableStateOf("unknown") }
     var lastError by remember { mutableStateOf<String?>(null) }
     var events by remember { mutableStateOf(listOf<UiEvent>()) }
     var firebaseError by remember { mutableStateOf<String?>(null) }
-    var selectedDayOffset by remember { mutableIntStateOf(0) }
+    var deviceFromCache by remember { mutableStateOf(false) }
+    var eventFromCache by remember { mutableStateOf(false) }
+    var refreshText by remember { mutableStateOf("Sẵn sàng cập nhật vị trí") }
+    var refreshRequestId by remember { mutableLongStateOf(0L) }
+    var selectedDayStart by remember { mutableLongStateOf(startOfToday()) }
 
     DisposableEffect(Unit) {
-        val a = db.collection("devices").document(CHILD_DOC).addSnapshotListener { d, error ->
-            if (error != null) firebaseError = "Thiết bị: ${error.code}"
-            else if (d != null && d.exists()) {
-                lat = d.getDouble("lastLat"); lon = d.getDouble("lastLon"); seen = d.getLong("lastSeen") ?: 0L
-                acc = d.getDouble("accuracy") ?: 0.0; deviceStatus = d.getString("status") ?: "unknown"
-                locationEnabled = d.getBoolean("locationEnabled"); lastError = d.getString("lastError")
+        val deviceListener = db.collection("devices").document(CHILD_DOC)
+            .addSnapshotListener(MetadataChanges.INCLUDE) { d, error ->
+                if (error != null) { firebaseError = "Thiết bị: ${error.code}"; return@addSnapshotListener }
+                if (d == null) return@addSnapshotListener
+                deviceFromCache = d.metadata.isFromCache
+                if (!d.exists()) return@addSnapshotListener
+                lat = d.getDouble("lastLat"); lon = d.getDouble("lastLon")
+                seen = d.getLong("lastSeen") ?: 0L; acc = d.getDouble("accuracy") ?: 0.0
+                heartbeatAt = d.getLong("heartbeatAt") ?: 0L
+                locationEnabled = d.getBoolean("locationEnabled")
+                fineLocationGranted = d.getBoolean("fineLocationGranted")
+                backgroundLocationGranted = d.getBoolean("backgroundLocationGranted")
+                serviceState = d.getString("serviceState") ?: d.getString("status") ?: "unknown"
+                lastError = d.getString("lastError")
+                val request = refreshRequestId
+                if (request > 0) {
+                    val completed = d.getLong("refreshCompletedFor") ?: 0L
+                    val failed = d.getLong("refreshFailedFor") ?: 0L
+                    val ack = d.getLong("refreshAckFor") ?: 0L
+                    when {
+                        completed == request -> { refreshText = "Đã nhận vị trí mới lúc ${if (seen > 0) fmt(seen) else fmt(System.currentTimeMillis())}"; refreshRequestId = 0L }
+                        failed == request -> { refreshText = "Máy con không cập nhật được: ${lastError ?: "không lấy được GPS"}"; refreshRequestId = 0L }
+                        ack == request -> refreshText = "Máy con đã nhận yêu cầu · đang lấy GPS..."
+                    }
+                }
             }
-        }
-        val b = db.collection("devices").document(CHILD_DOC).collection("events").orderBy("time").limitToLast(1500).addSnapshotListener { q, error ->
-            if (error != null) firebaseError = "Nhật ký: ${error.code}" else events = q?.documents?.mapNotNull { it.toObject(UiEvent::class.java) } ?: emptyList()
-        }
-        onDispose { a.remove(); b.remove() }
+
+        val eventListener = db.collection("devices").document(CHILD_DOC).collection("events")
+            .orderBy("time").limitToLast(5000)
+            .addSnapshotListener(MetadataChanges.INCLUDE) { q, error ->
+                if (error != null) firebaseError = "Nhật ký: ${error.code}"
+                else if (q != null) { eventFromCache = q.metadata.isFromCache; events = q.documents.mapNotNull { it.toObject(UiEvent::class.java) } }
+            }
+        onDispose { deviceListener.remove(); eventListener.remove() }
     }
 
-    val bounds = remember(selectedDayOffset) { dayBounds(selectedDayOffset) }
-    val dayEvents = remember(events, bounds) { events.filter { it.time in bounds.first until bounds.second } }
-    val visits = remember(dayEvents, bounds) { toVisits(dayEvents, bounds.first, bounds.second) }
+    LaunchedEffect(refreshRequestId) {
+        if (refreshRequestId > 0) {
+            kotlinx.coroutines.delay(45_000L)
+            if (refreshRequestId > 0) refreshText = "Chưa nhận được phản hồi từ máy con sau 45 giây"
+        }
+    }
+
+    val dayEnd = selectedDayStart + 24L * 60 * 60 * 1000
+    val dayEvents = remember(events, selectedDayStart) { events.filter { it.time in selectedDayStart until dayEnd } }
+    val visits = remember(dayEvents, selectedDayStart) { toVisits(dayEvents, selectedDayStart, dayEnd) }
+    val isToday = selectedDayStart == startOfToday()
+    val now = System.currentTimeMillis()
+    val staleLocation = seen > 0 && now - seen > 10 * 60_000L
+    val childOnline = heartbeatAt > 0 && now - heartbeatAt <= 10 * 60_000L
 
     MaterialTheme(colorScheme = darkColorScheme(primary = Color(0xFF55D8FF), background = Color(0xFF070A0F), surface = Color(0xFF111820))) {
         Scaffold(containerColor = MaterialTheme.colorScheme.background) { pad ->
             LazyColumn(Modifier.fillMaxSize().padding(pad), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
                 item {
                     Text("Guardian", style = MaterialTheme.typography.headlineMedium, color = Color.White)
-                    if (seen > 0L) Text("Cập nhật ${age(seen)} trước · ±${acc.toInt()} m", color = Color(0xFFA8BAC7)) else Text("Chưa nhận được vị trí từ máy con", color = Color(0xFFFFC857))
-                    if (locationEnabled == false || deviceStatus == "location_off") Text("Vị trí trên máy con đang tắt hoặc chưa lấy được vị trí mới", color = Color(0xFFFFC857))
-                    if (lastError != null) Text("Trạng thái: $lastError", color = Color(0xFFFFC857), style = MaterialTheme.typography.bodySmall)
-                    if (firebaseError != null) {
-                        Text("Lỗi Firebase: $firebaseError", color = MaterialTheme.colorScheme.error)
-                        Text("Nếu hiện PERMISSION_DENIED, cần cập nhật Firestore Rules.", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                    Spacer(Modifier.height(3.dp))
+                    when {
+                        seen == 0L && childOnline -> Text("Máy con đang kết nối · chưa nhận được GPS", color = Color(0xFFFFC857))
+                        seen == 0L -> Text("Chưa nhận được vị trí từ máy con", color = Color(0xFFFFC857))
+                        staleLocation -> Text("Vị trí cuối ${age(seen)} trước · dữ liệu đã cũ · ±${acc.toInt()} m", color = Color(0xFFFFC857))
+                        else -> Text("Vị trí cập nhật ${age(seen)} trước · ±${acc.toInt()} m", color = Color(0xFFA8BAC7))
+                    }
+                    Text(if (childOnline) "Kết nối máy con: đang hoạt động" else "Kết nối máy con: chưa có heartbeat gần đây", color = if (childOnline) Color(0xFF8BD6A5) else Color(0xFFA8BAC7), style = MaterialTheme.typography.bodySmall)
+                    if (deviceFromCache || eventFromCache) Text("Đang hiển thị dữ liệu lưu tạm; chờ kết nối máy chủ.", color = Color(0xFFFFC857), style = MaterialTheme.typography.bodySmall)
+                }
+
+                if (firebaseError != null) item {
+                    Card(colors = CardDefaults.cardColors(containerColor = Color(0xFF32171A))) {
+                        Column(Modifier.fillMaxWidth().padding(14.dp)) {
+                            Text("Firebase chưa kết nối được", color = Color(0xFFFF8A8A), style = MaterialTheme.typography.titleSmall)
+                            Text(firebaseError ?: "", color = Color(0xFFFFB0B0))
+                            if (firebaseError?.contains("PERMISSION_DENIED", true) == true) Text("Firestore Rules đang chặn Parent/Child. Cần Publish Rules cho người dùng đã đăng nhập.", color = Color(0xFFFFC857), style = MaterialTheme.typography.bodySmall)
+                        }
                     }
                 }
-                item { Card(Modifier.fillMaxWidth().height(360.dp)) { OsmMap(lat, lon, dayEvents, savedState, onMapViewCreated) } }
+
+                if (locationEnabled == false || fineLocationGranted == false || serviceState == "attention_needed" || lastError != null) item {
+                    Card(colors = CardDefaults.cardColors(containerColor = Color(0xFF2B2516))) {
+                        Column(Modifier.fillMaxWidth().padding(14.dp)) {
+                            if (locationEnabled == false) Text("Vị trí trên máy con đang tắt.", color = Color(0xFFFFC857))
+                            if (fineLocationGranted == false) Text("Máy con chưa cấp vị trí chính xác.", color = Color(0xFFFFC857))
+                            if (backgroundLocationGranted == false) Text("Máy con chưa cấp vị trí 'Mọi lúc'; tự khôi phục sau reboot có thể bị hạn chế.", color = Color(0xFFFFC857), style = MaterialTheme.typography.bodySmall)
+                            if (lastError != null) Text(lastError ?: "", color = Color(0xFFFFC857), style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
+                }
+
+                item { Card(Modifier.fillMaxWidth().height(360.dp)) { OsmMap(lat, lon, dayEvents, isToday, savedState, onMapViewCreated) } }
                 item { Text("Bản đồ: © OpenStreetMap contributors", color = Color(0xFF8799A6), style = MaterialTheme.typography.labelSmall) }
+
                 item {
                     Button(onClick = {
                         firebaseError = null
-                        db.collection("devices").document(CHILD_DOC).set(mapOf("refreshRequestedAt" to System.currentTimeMillis()), SetOptions.merge()).addOnFailureListener { firebaseError = "Yêu cầu cập nhật: ${it.javaClass.simpleName}" }
+                        val requestAt = System.currentTimeMillis()
+                        refreshText = "Đang gửi yêu cầu cập nhật..."
+                        db.collection("devices").document(CHILD_DOC).set(mapOf("refreshRequestedAt" to requestAt), SetOptions.merge())
+                            .addOnSuccessListener { refreshRequestId = requestAt; refreshText = "Đã gửi yêu cầu · chờ máy con phản hồi..." }
+                            .addOnFailureListener { e -> refreshRequestId = 0L; refreshText = "Không gửi được yêu cầu: ${e.javaClass.simpleName}"; firebaseError = "Yêu cầu cập nhật: ${e.message ?: e.javaClass.simpleName}" }
                     }, modifier = Modifier.fillMaxWidth()) { Text("CẬP NHẬT VỊ TRÍ NGAY") }
                 }
-                if (lat != null && lon != null) item {
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        OutlinedButton(onClick = { openGoogleMapsPoint(context, lat!!, lon!!) }, modifier = Modifier.weight(1f)) { Text("XEM TRÊN GOOGLE MAPS") }
-                        OutlinedButton(onClick = { openGoogleMapsDirections(context, lat!!, lon!!) }, modifier = Modifier.weight(1f)) { Text("DẪN ĐƯỜNG") }
-                    }
-                }
+                item { Text(refreshText, color = Color(0xFFA8BAC7), style = MaterialTheme.typography.bodySmall) }
+
                 item {
-                    Text("Nhật ký ${dayLabel(selectedDayOffset)}", style = MaterialTheme.typography.titleLarge, color = Color.White)
-                    Spacer(Modifier.height(8.dp))
-                    Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        for (offset in 0 downTo -6) FilterChip(selected = selectedDayOffset == offset, onClick = { selectedDayOffset = offset }, label = { Text(shortDayLabel(offset)) })
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        OutlinedButton(onClick = { if (lat != null && lon != null) openGoogleMapsPoint(context, lat!!, lon!!) }, enabled = lat != null && lon != null, modifier = Modifier.weight(1f)) { Text("XEM GOOGLE MAPS") }
+                        OutlinedButton(onClick = { if (lat != null && lon != null) openGoogleMapsDirections(context, lat!!, lon!!) }, enabled = lat != null && lon != null, modifier = Modifier.weight(1f)) { Text("DẪN ĐƯỜNG") }
+                    }
+                    if (lat == null || lon == null) { Spacer(Modifier.height(5.dp)); Text("Sẽ bật ngay khi nhận được tọa độ thật từ máy con.", color = Color(0xFF8799A6), style = MaterialTheme.typography.bodySmall) }
+                }
+
+                item {
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text(if (isToday) "Nhật ký hôm nay" else "Nhật ký ${formatDate(selectedDayStart)}", style = MaterialTheme.typography.titleLarge, color = Color.White)
+                        OutlinedButton(onClick = {
+                            val c = Calendar.getInstance().apply { timeInMillis = selectedDayStart }
+                            val dialog = DatePickerDialog(context, { _, y, m, d -> selectedDayStart = startOfDate(y, m, d) }, c.get(Calendar.YEAR), c.get(Calendar.MONTH), c.get(Calendar.DAY_OF_MONTH))
+                            dialog.datePicker.maxDate = System.currentTimeMillis(); dialog.show()
+                        }) { Text("CHỌN NGÀY") }
+                    }
+                    if (!isToday) TextButton(onClick = { selectedDayStart = startOfToday() }) { Text("Quay về hôm nay") }
+                }
+
+                when {
+                    dayEvents.isEmpty() -> item { Text("Ngày này chưa có dữ liệu vị trí.", color = Color(0xFFA8BAC7)) }
+                    visits.isNotEmpty() -> items(visits) { visit -> VisitCard(visit) { vLat, vLon -> openGoogleMapsPoint(context, vLat, vLon) } }
+                    else -> items(dayEvents.filter { it.type == "location_sample" || it.type == "trip_point" }.sortedByDescending { it.time }.take(50)) { sample ->
+                        Card { Column(Modifier.fillMaxWidth().padding(16.dp)) {
+                            Text("Điểm ghi nhận ${fmt(sample.time)}", color = Color.White)
+                            Text("${sample.lat ?: 0.0}, ${sample.lon ?: 0.0}${sample.accuracy?.let { " · ±${it.toInt()} m" } ?: ""}", color = Color(0xFFB7C8D5))
+                            if (sample.lat != null && sample.lon != null) TextButton(onClick = { openGoogleMapsPoint(context, sample.lat, sample.lon) }, contentPadding = PaddingValues(0.dp)) { Text("XEM TRÊN GOOGLE MAPS") }
+                        } }
                     }
                 }
-                if (dayEvents.isEmpty()) item { Text("Ngày này chưa có dữ liệu vị trí.", color = Color(0xFFA8BAC7)) }
-                else if (visits.isEmpty()) items(dayEvents.filter { it.type == "location_sample" }.sortedByDescending { it.time }.take(20)) { sample ->
-                    Card { Column(Modifier.fillMaxWidth().padding(16.dp)) {
-                        Text("Điểm ghi nhận ${fmt(sample.time)}", color = Color.White)
-                        Text("${sample.lat ?: 0.0}, ${sample.lon ?: 0.0}${sample.accuracy?.let { " · ±${it.toInt()} m" } ?: ""}", color = Color(0xFFB7C8D5))
-                        if (sample.lat != null && sample.lon != null) TextButton(onClick = { openGoogleMapsPoint(context, sample.lat, sample.lon) }, contentPadding = PaddingValues(0.dp)) { Text("XEM TRÊN GOOGLE MAPS") }
-                    } }
-                }
-                else items(visits) { visit -> Card { Column(Modifier.fillMaxWidth().padding(16.dp)) {
-                    Text(visit.title, color = Color.White, style = MaterialTheme.typography.titleMedium); Text(visit.detail, color = Color(0xFFB7C8D5))
-                    if (visit.lat != null && visit.lon != null) { Spacer(Modifier.height(8.dp)); TextButton(onClick = { openGoogleMapsPoint(context, visit.lat, visit.lon) }, contentPadding = PaddingValues(0.dp)) { Text("XEM ĐIỂM NÀY TRÊN GOOGLE MAPS") } }
-                } } }
             }
         }
     }
 }
 
 @Composable
-private fun OsmMap(lat: Double?, lon: Double?, events: List<UiEvent>, savedState: Bundle?, onMapViewCreated: (MapView) -> Unit) {
-    var map by remember { mutableStateOf<MapLibreMap?>(null) }; var renderedKey by remember { mutableIntStateOf(Int.MIN_VALUE) }
-    AndroidView(modifier = Modifier.fillMaxSize(), factory = { context ->
-        MapView(context).also { view ->
-            view.onCreate(savedState); onMapViewCreated(view); view.getMapAsync { readyMap ->
-                map = readyMap; readyMap.uiSettings.apply { isZoomGesturesEnabled = true; isScrollGesturesEnabled = true; isRotateGesturesEnabled = true; isTiltGesturesEnabled = false }
-                readyMap.setStyle(Style.Builder().fromUri(OSM_STYLE)) { showMapData(readyMap, lat, lon, events); renderedKey = mapKey(lat, lon, events) }
-            }
-        }
-    }, update = { val current = map; val key = mapKey(lat, lon, events); if (current != null && key != renderedKey) { showMapData(current, lat, lon, events); renderedKey = key } })
+private fun VisitCard(visit: UiVisit, openMap: (Double, Double) -> Unit) {
+    Card { Column(Modifier.fillMaxWidth().padding(16.dp)) {
+        Text(visit.title, color = Color.White, style = MaterialTheme.typography.titleMedium)
+        Text(visit.detail, color = Color(0xFFB7C8D5))
+        if (visit.lat != null && visit.lon != null) { Spacer(Modifier.height(8.dp)); TextButton(onClick = { openMap(visit.lat, visit.lon) }, contentPadding = PaddingValues(0.dp)) { Text("XEM ĐIỂM NÀY TRÊN GOOGLE MAPS") } }
+    } }
 }
 
-private fun mapKey(lat: Double?, lon: Double?, events: List<UiEvent>): Int = listOf(lat, lon, events.hashCode()).hashCode()
+@Composable
+private fun OsmMap(currentLat: Double?, currentLon: Double?, events: List<UiEvent>, showCurrent: Boolean, savedState: Bundle?, onMapViewCreated: (MapView) -> Unit) {
+    var map by remember { mutableStateOf<MapLibreMap?>(null) }
+    var renderedKey by remember { mutableIntStateOf(Int.MIN_VALUE) }
+    AndroidView(modifier = Modifier.fillMaxSize(), factory = { context ->
+        MapView(context).also { view ->
+            view.onCreate(savedState); onMapViewCreated(view)
+            view.getMapAsync { readyMap ->
+                map = readyMap
+                readyMap.uiSettings.apply { isZoomGesturesEnabled = true; isScrollGesturesEnabled = true; isRotateGesturesEnabled = true; isTiltGesturesEnabled = false }
+                readyMap.setStyle(Style.Builder().fromUri(OSM_STYLE)) { showMapData(readyMap, currentLat, currentLon, events, showCurrent); renderedKey = mapKey(currentLat, currentLon, events, showCurrent) }
+            }
+        }
+    }, update = {
+        val current = map; val key = mapKey(currentLat, currentLon, events, showCurrent)
+        if (current != null && key != renderedKey) { showMapData(current, currentLat, currentLon, events, showCurrent); renderedKey = key }
+    })
+}
+
+private fun mapKey(lat: Double?, lon: Double?, events: List<UiEvent>, showCurrent: Boolean): Int = listOf(lat, lon, events.hashCode(), showCurrent).hashCode()
 
 @Suppress("DEPRECATION")
-private fun showMapData(map: MapLibreMap, lat: Double?, lon: Double?, events: List<UiEvent>) {
+private fun showMapData(map: MapLibreMap, lat: Double?, lon: Double?, events: List<UiEvent>, showCurrent: Boolean) {
     map.clear()
     val points = events.filter { (it.type == "location_sample" || it.type == "trip_point") && it.lat != null && it.lon != null }.sortedBy { it.time }.map { LatLng(it.lat!!, it.lon!!) }
     if (points.size >= 2) map.addPolyline(PolylineOptions().addAll(points).width(5f))
     events.filter { it.type == "visit_start" && it.lat != null && it.lon != null }.forEachIndexed { index, e -> map.addMarker(MarkerOptions().position(LatLng(e.lat!!, e.lon!!)).title("Điểm dừng ${index + 1}").snippet(fmt(e.time))) }
-    if (lat != null && lon != null) {
-        val latest = LatLng(lat, lon); map.addMarker(MarkerOptions().position(latest).title("Vị trí mới nhất").snippet("$lat, $lon")); map.cameraPosition = CameraPosition.Builder().target(latest).zoom(16.0).build()
-    } else if (points.isNotEmpty()) map.cameraPosition = CameraPosition.Builder().target(points.last()).zoom(15.0).build()
-    else map.cameraPosition = CameraPosition.Builder().target(LatLng(16.0, 106.0)).zoom(5.0).build()
+    when {
+        showCurrent && lat != null && lon != null -> { val latest = LatLng(lat, lon); map.addMarker(MarkerOptions().position(latest).title("Vị trí mới nhất").snippet("$lat, $lon")); map.cameraPosition = CameraPosition.Builder().target(latest).zoom(16.0).build() }
+        points.isNotEmpty() -> map.cameraPosition = CameraPosition.Builder().target(points.last()).zoom(15.0).build()
+        else -> map.cameraPosition = CameraPosition.Builder().target(LatLng(16.0, 106.0)).zoom(5.0).build()
+    }
 }
 
 private fun openGoogleMapsPoint(context: android.content.Context, lat: Double, lon: Double) {
-    val uri = Uri.parse("https://www.google.com/maps/search/?api=1&query=$lat,$lon"); val appIntent = Intent(Intent.ACTION_VIEW, uri).apply { setPackage("com.google.android.apps.maps") }
+    val uri = Uri.parse("https://www.google.com/maps/search/?api=1&query=$lat,$lon")
+    val appIntent = Intent(Intent.ACTION_VIEW, uri).apply { setPackage("com.google.android.apps.maps") }
     try { context.startActivity(appIntent) } catch (_: ActivityNotFoundException) { context.startActivity(Intent(Intent.ACTION_VIEW, uri)) }
 }
 private fun openGoogleMapsDirections(context: android.content.Context, lat: Double, lon: Double) {
-    val uri = Uri.parse("https://www.google.com/maps/dir/?api=1&destination=$lat,$lon"); val appIntent = Intent(Intent.ACTION_VIEW, uri).apply { setPackage("com.google.android.apps.maps") }
+    val uri = Uri.parse("https://www.google.com/maps/dir/?api=1&destination=$lat,$lon")
+    val appIntent = Intent(Intent.ACTION_VIEW, uri).apply { setPackage("com.google.android.apps.maps") }
     try { context.startActivity(appIntent) } catch (_: ActivityNotFoundException) { context.startActivity(Intent(Intent.ACTION_VIEW, uri)) }
 }
-fun age(t: Long): String { val s = ((System.currentTimeMillis() - t) / 1000).coerceAtLeast(0); return when { s < 60 -> "${s}s"; s < 3600 -> "${s / 60} phút"; else -> "${s / 3600} giờ" } }
+
+fun age(t: Long): String { val s = ((System.currentTimeMillis() - t) / 1000).coerceAtLeast(0); return when { s < 60 -> "${s}s"; s < 3600 -> "${s / 60} phút"; s < 86400 -> "${s / 3600} giờ"; else -> "${s / 86400} ngày" } }
 fun fmt(t: Long): String = SimpleDateFormat("HH:mm", Locale("vi", "VN")).format(Date(t))
-private fun dayBounds(offset: Int): Pair<Long, Long> { val c = Calendar.getInstance().apply { add(Calendar.DAY_OF_YEAR, offset); set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0) }; val start = c.timeInMillis; c.add(Calendar.DAY_OF_YEAR, 1); return start to c.timeInMillis }
-private fun dayLabel(offset: Int): String { if (offset == 0) return "hôm nay"; val (start, _) = dayBounds(offset); return SimpleDateFormat("dd/MM/yyyy", Locale("vi", "VN")).format(Date(start)) }
-private fun shortDayLabel(offset: Int): String { if (offset == 0) return "Hôm nay"; if (offset == -1) return "Hôm qua"; val (start, _) = dayBounds(offset); return SimpleDateFormat("dd/MM", Locale("vi", "VN")).format(Date(start)) }
+fun formatDate(t: Long): String = SimpleDateFormat("dd/MM/yyyy", Locale("vi", "VN")).format(Date(t))
+fun startOfToday(): Long { val c = Calendar.getInstance(); c.set(Calendar.HOUR_OF_DAY,0); c.set(Calendar.MINUTE,0); c.set(Calendar.SECOND,0); c.set(Calendar.MILLISECOND,0); return c.timeInMillis }
+fun startOfDate(year: Int, month: Int, day: Int): Long = Calendar.getInstance().apply { set(Calendar.YEAR,year); set(Calendar.MONTH,month); set(Calendar.DAY_OF_MONTH,day); set(Calendar.HOUR_OF_DAY,0); set(Calendar.MINUTE,0); set(Calendar.SECOND,0); set(Calendar.MILLISECOND,0) }.timeInMillis
 fun toVisits(events: List<UiEvent>, dayStart: Long, dayEnd: Long): List<UiVisit> {
     val starts = events.filter { it.type == "visit_start" }.associateBy { it.id }; val ends = events.filter { it.type == "visit_end" }.associateBy { it.id }
     return starts.values.sortedByDescending { it.time }.mapNotNull { s ->
-        val rawEnd = ends[s.id]?.time ?: if (s.time < dayEnd && dayEnd <= System.currentTimeMillis()) dayEnd else System.currentTimeMillis(); val visibleStart = maxOf(s.time, dayStart); val visibleEnd = minOf(rawEnd, dayEnd, System.currentTimeMillis())
-        if (visibleEnd <= visibleStart) null else { val dur = (visibleEnd - visibleStart) / 60_000; UiVisit("Địa điểm", "${fmt(visibleStart)} → ${if (ends[s.id] == null && dayEnd > System.currentTimeMillis()) "Hiện tại" else fmt(visibleEnd)} · ${dur / 60}h ${dur % 60}p", s.lat, s.lon) }
+        val rawEnd = ends[s.id]?.time ?: if (dayEnd <= System.currentTimeMillis()) dayEnd else System.currentTimeMillis()
+        val visibleStart = maxOf(s.time, dayStart); val visibleEnd = minOf(rawEnd, dayEnd, System.currentTimeMillis())
+        if (visibleEnd <= visibleStart) null else { val dur = (visibleEnd - visibleStart) / 60_000; val endText = if (ends[s.id] == null && dayEnd > System.currentTimeMillis()) "Hiện tại" else fmt(visibleEnd); UiVisit("Địa điểm", "${fmt(visibleStart)} → $endText · ${dur / 60}h ${dur % 60}p", s.lat, s.lon) }
     }
 }
