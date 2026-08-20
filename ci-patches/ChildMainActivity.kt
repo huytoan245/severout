@@ -70,17 +70,38 @@ fun ClockScreen() {
         Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background), contentAlignment = Alignment.Center) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Canvas(Modifier.size(310.dp)) {
-                    val c = Offset(size.width / 2, size.height / 2); val r = size.minDimension * .45f
-                    drawCircle(Color(0xFF111923), r, c); drawCircle(Color(0xFF2B3A49), r, c, style = androidx.compose.ui.graphics.drawscope.Stroke(2f))
+                    val c = Offset(size.width / 2, size.height / 2)
+                    val r = size.minDimension * .45f
+                    drawCircle(Color(0xFF111923), r, c)
+                    drawCircle(Color(0xFF2B3A49), r, c, style = androidx.compose.ui.graphics.drawscope.Stroke(2f))
                     for (i in 0 until 60) {
-                        val a = Math.toRadians(i * 6.0 - 90); val major = i % 5 == 0; val inner = r - (if (major) 18f else 8f); val outer = r - 2f
-                        drawLine(if (major) Color(0xFFE8F2FA) else Color(0xFF607080), Offset(c.x + cos(a).toFloat() * inner, c.y + sin(a).toFloat() * inner), Offset(c.x + cos(a).toFloat() * outer, c.y + sin(a).toFloat() * outer), if (major) 3f else 1f)
+                        val a = Math.toRadians(i * 6.0 - 90)
+                        val major = i % 5 == 0
+                        val inner = r - (if (major) 18f else 8f)
+                        val outer = r - 2f
+                        drawLine(
+                            if (major) Color(0xFFE8F2FA) else Color(0xFF607080),
+                            Offset(c.x + cos(a).toFloat() * inner, c.y + sin(a).toFloat() * inner),
+                            Offset(c.x + cos(a).toFloat() * outer, c.y + sin(a).toFloat() * outer),
+                            if (major) 3f else 1f
+                        )
                     }
-                    fun hand(angleDeg: Double, len: Float, width: Float, color: Color) { val a = Math.toRadians(angleDeg - 90); drawLine(color, c, Offset(c.x + cos(a).toFloat() * len, c.y + sin(a).toFloat() * len), width, StrokeCap.Round) }
-                    val sec = now.second + now.nano / 1e9; val min = now.minute + sec / 60; val hour = (now.hour % 12) + min / 60
-                    hand(hour * 30, r * .52f, 10f, Color.White); hand(min * 6, r * .72f, 6f, Color.White); hand(sec * 6, r * .82f, 2f, primary); drawCircle(primary, 8f, c)
+                    fun hand(angleDeg: Double, len: Float, width: Float, color: Color) {
+                        val a = Math.toRadians(angleDeg - 90)
+                        drawLine(color, c, Offset(c.x + cos(a).toFloat() * len, c.y + sin(a).toFloat() * len), width, StrokeCap.Round)
+                    }
+                    val sec = now.second + now.nano / 1e9
+                    val min = now.minute + sec / 60
+                    val hour = (now.hour % 12) + min / 60
+                    hand(hour * 30, r * .52f, 10f, Color.White)
+                    hand(min * 6, r * .72f, 6f, Color.White)
+                    hand(sec * 6, r * .82f, 2f, primary)
+                    drawCircle(primary, 8f, c)
                 }
-                Spacer(Modifier.height(28.dp)); Text("Thời gian quý giá", color = Color(0xFFB8C7D4), style = MaterialTheme.typography.titleMedium)
+                Spacer(Modifier.height(28.dp))
+                Text("Thời gian quý giá", color = Color(0xFFB8C7D4), style = MaterialTheme.typography.titleMedium)
+                Spacer(Modifier.height(10.dp))
+                Text("Điện thoại của bạn đang được bảo vệ an toàn", color = Color(0xFF7FA7B8), style = MaterialTheme.typography.bodySmall)
             }
         }
     }
