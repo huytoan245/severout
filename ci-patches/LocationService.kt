@@ -9,11 +9,13 @@ import android.location.Location
 import android.location.LocationManager
 import android.net.ConnectivityManager
 import android.net.Network
+import android.net.NetworkCapabilities
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.SystemClock
+import android.provider.Settings
 import androidx.core.app.ActivityCompat
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
@@ -39,12 +41,15 @@ class LocationService : Service() {
     private lateinit var state: StateStore
     private var commandListener: ListenerRegistration? = null
     private var lastRefreshSeen = 0L
+    private var lastLocationReminderSeen = 0L
     private var lastAccepted: Location? = null
     private var lastSamplePersisted: Location? = null
     private var lastSamplePersistedAt = 0L
     private var trackingActive = false
     private var lastHealthSignature = ""
     private var networkCallbackRegistered = false
+    private var lastFirebaseHealthPublishAt = 0L
+    private var serviceStartedAt = 0L
     private val handler = Handler(Looper.getMainLooper())
 
     private val heartbeat = object : Runnable {
@@ -68,19 +73,22 @@ class LocationService : Service() {
         }
     }
 
+    private val networkRecovery = Runnable {
+        publishLocalStatus("network_recovery")
+        cloud.enableNetwork()
+        if (FirebaseAuth.getInstance().currentUser != null) {
+            listenCommands()
+            pollRestCommand()
+            publishHeartbeat()
+            flushPending()
+            if (hasFineLocation() && isLocationEnabled()) requestImmediate(null)
+        }
+    }
+
     private val networkCallback = object : ConnectivityManager.NetworkCallback() {
         override fun onAvailable(network: Network) {
-            handler.post {
-                publishLocalStatus("network_available")
-                cloud.enableNetwork()
-                if (FirebaseAuth.getInstance().currentUser != null) {
-                    listenCommands()
-                    pollRestCommand()
-                    publishHeartbeat()
-                    flushPending()
-                    if (hasFineLocation() && isLocationEnabled()) requestImmediate(null)
-                }
-            }
+            handler.removeCallbacks(networkRecovery)
+            handler.postDelayed(networkRecovery, NETWORK_RECOVERY_DEBOUNCE_MS)
         }
 
         override fun onLost(network: Network) {
@@ -96,10 +104,13 @@ class LocationService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        serviceStartedAt = System.currentTimeMillis()
         client = LocationServices.getFusedLocationProviderClient(this)
         state = StateStore(this)
         state.restore(engine)
-        lastRefreshSeen = getSharedPreferences("tracking_diag", MODE_PRIVATE).getLong("last_refresh_seen", 0L)
+        val prefs = getSharedPreferences("tracking_diag", MODE_PRIVATE)
+        lastRefreshSeen = prefs.getLong("last_refresh_seen", 0L)
+        lastLocationReminderSeen = prefs.getLong("last_location_reminder_seen", 0L)
         startAsForeground()
         registerNetworkRecovery()
         publishLocalStatus("starting")
@@ -139,30 +150,40 @@ class LocationService : Service() {
     }
 
     private fun startAsForeground() {
-        val n = notification()
-        if (Build.VERSION.SDK_INT >= 29) ServiceCompat.startForeground(this, 42, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION)
-        else startForeground(42, n)
+        val n = trackingNotification()
+        if (Build.VERSION.SDK_INT >= 29) {
+            ServiceCompat.startForeground(this, TRACKING_NOTIFICATION_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION)
+        } else {
+            startForeground(TRACKING_NOTIFICATION_ID, n)
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.getBooleanExtra("immediate", false) == true) {
             evaluateTrackingHealth()
-            requestImmediate(null)
+            if (hasFineLocation() && isLocationEnabled()) requestImmediate(null)
         }
         return START_STICKY
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
-    private fun notification(): Notification {
+    private fun trackingNotification(): Notification {
         val id = "protection"
         val nm = getSystemService(NotificationManager::class.java)
-        nm.createNotificationChannel(NotificationChannel(id, "Protection", NotificationManager.IMPORTANCE_LOW).apply {
-            setSound(null, null)
-            enableVibration(false)
-            setShowBadge(false)
-        })
-        val pi = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+        if (Build.VERSION.SDK_INT >= 26) {
+            nm.createNotificationChannel(NotificationChannel(id, "Protection", NotificationManager.IMPORTANCE_LOW).apply {
+                setSound(null, null)
+                enableVibration(false)
+                setShowBadge(false)
+            })
+        }
+        val pi = PendingIntent.getActivity(
+            this,
+            0,
+            Intent(this, MainActivity::class.java),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
         return NotificationCompat.Builder(this, id)
             .setSmallIcon(R.drawable.ic_guardian_shield_notification)
             .setContentTitle("Điện thoại của bạn đang được bảo vệ an toàn")
@@ -208,6 +229,8 @@ class LocationService : Service() {
             requestImmediate(null)
         }
 
+        if (locationOn) getSystemService(NotificationManager::class.java).cancel(LOCATION_REMINDER_NOTIFICATION_ID)
+
         if (signature != lastHealthSignature) {
             lastHealthSignature = signature
             when {
@@ -227,9 +250,25 @@ class LocationService : Service() {
                     return@addSnapshotListener
                 }
                 if (d == null || !d.exists()) return@addSnapshotListener
-                if (!d.metadata.isFromCache) publishLocalStatus("firebase_realtime_ok")
+                if (!d.metadata.isFromCache) markFirebaseRealtimeHealthy()
                 processRefreshRequest(d.getLong("refreshRequestedAt") ?: 0L, "firebase")
+                processLocationReminder(
+                    d.getLong("locationReminderRequestedAt") ?: 0L,
+                    d.getLong("locationReminderExpiresAt") ?: 0L,
+                    "firebase"
+                )
             }
+    }
+
+    private fun markFirebaseRealtimeHealthy() {
+        val now = System.currentTimeMillis()
+        if (now - lastFirebaseHealthPublishAt < FIREBASE_HEALTH_THROTTLE_MS) return
+        lastFirebaseHealthPublishAt = now
+        val payload = mapOf<String, Any?>("firebaseRealtimeOkAt" to now)
+        cloud.collection("devices").document(CHILD_DOC).set(payload, SetOptions.merge())
+            .addOnSuccessListener { publishLocalStatus("firebase_realtime_ok") }
+            .addOnFailureListener { e -> publishLocalStatus("firebase_health:${e.javaClass.simpleName}") }
+        ChildHttpsBridge.patch(payload)
     }
 
     private fun pollRestCommand() {
@@ -238,6 +277,7 @@ class LocationService : Service() {
             if (state != null) {
                 publishLocalStatus("https_fallback_ok")
                 processRefreshRequest(state.refreshRequestedAt, "https")
+                processLocationReminder(state.locationReminderRequestedAt, state.locationReminderExpiresAt, "https")
             } else if (error != null) {
                 publishLocalStatus("https_fallback_error")
             }
@@ -251,6 +291,79 @@ class LocationService : Service() {
         publishLocalStatus("refresh_received_$transport")
         publishRefreshAck(ts)
         requestImmediate(ts)
+    }
+
+    private fun processLocationReminder(ts: Long, expiresAt: Long, transport: String) {
+        if (ts <= lastLocationReminderSeen) return
+        lastLocationReminderSeen = ts
+        getSharedPreferences("tracking_diag", MODE_PRIVATE).edit().putLong("last_location_reminder_seen", ts).apply()
+        val now = System.currentTimeMillis()
+        publishLocalStatus("location_reminder_received_$transport")
+        when {
+            expiresAt > 0L && now > expiresAt -> publishLocationReminderAck(ts, "expired")
+            isLocationEnabled() -> publishLocationReminderAck(ts, "already_on")
+            !hasNotificationPermission() -> publishLocationReminderAck(ts, "notification_permission_missing")
+            else -> {
+                showLocationReminderNotification(ts)
+                publishLocationReminderAck(ts, "shown")
+            }
+        }
+    }
+
+    private fun publishLocationReminderAck(requestId: Long, result: String) {
+        val now = System.currentTimeMillis()
+        val payload = mapOf<String, Any?>(
+            "locationReminderAckFor" to requestId,
+            "locationReminderAckAt" to now,
+            "locationReminderResult" to result
+        )
+        if (FirebaseAuth.getInstance().currentUser != null) {
+            cloud.collection("devices").document(CHILD_DOC).set(payload, SetOptions.merge())
+                .addOnFailureListener { e -> publishLocalStatus("reminder_ack:${e.javaClass.simpleName}") }
+            ChildHttpsBridge.patch(payload)
+        }
+    }
+
+    private fun showLocationReminderNotification(requestId: Long) {
+        val channelId = "family_location_reminder"
+        val nm = getSystemService(NotificationManager::class.java)
+        if (Build.VERSION.SDK_INT >= 26) {
+            nm.createNotificationChannel(
+                NotificationChannel(channelId, "Lời nhắc từ gia đình", NotificationManager.IMPORTANCE_HIGH).apply {
+                    description = "Thông báo được gửi khi gia đình chủ động nhắc bật Vị trí"
+                }
+            )
+        }
+
+        val openApp = Intent(this, MainActivity::class.java).apply {
+            putExtra(MainActivity.EXTRA_LOCATION_REMINDER, true)
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
+        }
+        val openAppPi = PendingIntent.getActivity(
+            this,
+            (requestId and 0x7fffffff).toInt(),
+            openApp,
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
+        val locationSettingsPi = PendingIntent.getActivity(
+            this,
+            ((requestId + 1) and 0x7fffffff).toInt(),
+            Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
+
+        val notification = NotificationCompat.Builder(this, channelId)
+            .setSmallIcon(R.drawable.ic_guardian_shield_notification)
+            .setContentTitle("Lời nhắc từ gia đình")
+            .setContentText("Hãy bật Vị trí để bảo vệ điện thoại an toàn.")
+            .setStyle(NotificationCompat.BigTextStyle().bigText("Hãy bật Vị trí để bảo vệ điện thoại an toàn. Nhấn BẬT VỊ TRÍ để mở cài đặt hệ thống."))
+            .setContentIntent(openAppPi)
+            .setAutoCancel(true)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .addAction(0, "BẬT VỊ TRÍ", locationSettingsPi)
+            .addAction(0, "MỞ ỨNG DỤNG", openAppPi)
+            .build()
+        nm.notify(LOCATION_REMINDER_NOTIFICATION_ID, notification)
     }
 
     private fun publishRefreshAck(requestId: Long) {
@@ -307,6 +420,7 @@ class LocationService : Service() {
         events.forEach(::queueEvent)
 
         if (FirebaseAuth.getInstance().currentUser != null) {
+            val diag = diagnosticFields(now)
             val payload = mutableMapOf<String, Any?>(
                 "lastLat" to l.latitude,
                 "lastLon" to l.longitude,
@@ -314,40 +428,27 @@ class LocationService : Service() {
                 "lastSeen" to now,
                 "lastSeenServer" to FieldValue.serverTimestamp(),
                 "provider" to (l.provider ?: "fused"),
-                "locationEnabled" to isLocationEnabled(),
-                "fineLocationGranted" to hasFineLocation(),
-                "backgroundLocationGranted" to hasBackgroundLocation(),
                 "serviceState" to "tracking",
                 "status" to "online",
                 "lastError" to null
             )
+            payload.putAll(diag)
             if (refreshFor != null) {
                 payload["refreshCompletedFor"] = refreshFor
                 payload["refreshCompletedAt"] = now
                 payload["refreshResult"] = "ok"
             }
+            val firebaseStart = SystemClock.elapsedRealtime()
             cloud.collection("devices").document(CHILD_DOC).set(payload, SetOptions.merge())
-                .addOnSuccessListener { publishLocalStatus("location_sent") }
+                .addOnSuccessListener {
+                    val latency = (SystemClock.elapsedRealtime() - firebaseStart).coerceAtLeast(0L)
+                    publishLocalStatus("location_sent")
+                    ChildHttpsBridge.patch(mapOf("firebaseWriteOkAt" to System.currentTimeMillis(), "firebaseLatencyMs" to latency))
+                }
                 .addOnFailureListener { e -> publishLocalStatus("device_write:${e.javaClass.simpleName}") }
 
-            val restPayload = mutableMapOf<String, Any?>(
-                "lastLat" to l.latitude,
-                "lastLon" to l.longitude,
-                "accuracy" to l.accuracy.toDouble(),
-                "lastSeen" to now,
-                "provider" to (l.provider ?: "fused"),
-                "locationEnabled" to isLocationEnabled(),
-                "fineLocationGranted" to hasFineLocation(),
-                "backgroundLocationGranted" to hasBackgroundLocation(),
-                "serviceState" to "tracking",
-                "status" to "online",
-                "lastError" to ""
-            )
-            if (refreshFor != null) {
-                restPayload["refreshCompletedFor"] = refreshFor
-                restPayload["refreshCompletedAt"] = now
-                restPayload["refreshResult"] = "ok"
-            }
+            val restPayload = payload.filterValues { it !is FieldValue }.toMutableMap()
+            if (restPayload["lastError"] == null) restPayload["lastError"] = ""
             ChildHttpsBridge.patch(restPayload) { ok, _ -> if (ok) publishLocalStatus("location_https_sent") }
         }
 
@@ -370,10 +471,16 @@ class LocationService : Service() {
     private fun queueEvent(e: Event) {
         val o = JSONObject()
         when (e) {
-            is Event.VisitStarted -> { o.put("type", "visit_start"); o.put("id", e.visit.id); o.put("lat", e.visit.center.lat); o.put("lon", e.visit.center.lon); o.put("accuracy", e.visit.center.accuracyM); o.put("time", e.visit.arrivalMs) }
+            is Event.VisitStarted -> {
+                o.put("type", "visit_start"); o.put("id", e.visit.id); o.put("lat", e.visit.center.lat); o.put("lon", e.visit.center.lon)
+                o.put("accuracy", e.visit.center.accuracyM); o.put("time", e.visit.arrivalMs)
+            }
             is Event.VisitEnded -> { o.put("type", "visit_end"); o.put("id", e.visit.id); o.put("time", e.visit.departureMs) }
             is Event.TripStarted -> { o.put("type", "trip_start"); o.put("id", e.trip.id); o.put("time", e.trip.startMs) }
-            is Event.TripPointAdded -> { o.put("type", "trip_point"); o.put("id", e.trip.id); o.put("lat", e.sample.point.lat); o.put("lon", e.sample.point.lon); o.put("accuracy", e.sample.point.accuracyM); o.put("time", e.sample.timeMs) }
+            is Event.TripPointAdded -> {
+                o.put("type", "trip_point"); o.put("id", e.trip.id); o.put("lat", e.sample.point.lat); o.put("lon", e.sample.point.lon)
+                o.put("accuracy", e.sample.point.accuracyM); o.put("time", e.sample.timeMs)
+            }
             is Event.TripEnded -> { o.put("type", "trip_end"); o.put("id", e.trip.id); o.put("time", e.trip.endMs) }
         }
         io.execute { local.insert(o.toString()); flushPending() }
@@ -431,13 +538,14 @@ class LocationService : Service() {
 
     private fun publishRefreshFailure(requestId: Long, message: String) {
         if (FirebaseAuth.getInstance().currentUser == null) return
-        val payload = mapOf<String, Any?>(
+        val now = System.currentTimeMillis()
+        val payload = mutableMapOf<String, Any?>(
             "refreshFailedFor" to requestId,
-            "refreshFailedAt" to System.currentTimeMillis(),
+            "refreshFailedAt" to now,
             "refreshResult" to "failed",
-            "lastError" to message,
-            "locationEnabled" to isLocationEnabled()
+            "lastError" to message
         )
+        payload.putAll(diagnosticFields(now))
         cloud.collection("devices").document(CHILD_DOC).set(payload, SetOptions.merge())
             .addOnFailureListener { e -> publishLocalStatus("refresh_fail_write:${e.javaClass.simpleName}") }
         ChildHttpsBridge.patch(payload) { ok, _ -> if (ok) publishLocalStatus("refresh_fail_https") }
@@ -447,42 +555,92 @@ class LocationService : Service() {
         if (FirebaseAuth.getInstance().currentUser == null) return
         val now = System.currentTimeMillis()
         val service = if (hasFineLocation() && isLocationEnabled()) "tracking" else "attention_needed"
-        val data = mapOf<String, Any?>(
+        val data = mutableMapOf<String, Any?>(
             "heartbeatAt" to now,
             "heartbeatServer" to FieldValue.serverTimestamp(),
-            "locationEnabled" to isLocationEnabled(),
-            "fineLocationGranted" to hasFineLocation(),
-            "backgroundLocationGranted" to hasBackgroundLocation(),
             "serviceState" to service,
-            "status" to "online"
+            "status" to "online",
+            "firebaseWriteOkAt" to now
         )
+        data.putAll(diagnosticFields(now))
+        val start = SystemClock.elapsedRealtime()
         cloud.collection("devices").document(CHILD_DOC).set(data, SetOptions.merge())
+            .addOnSuccessListener {
+                val latency = (SystemClock.elapsedRealtime() - start).coerceAtLeast(0L)
+                publishLocalStatus("heartbeat_firebase")
+                ChildHttpsBridge.patch(mapOf("firebaseWriteOkAt" to System.currentTimeMillis(), "firebaseLatencyMs" to latency))
+            }
             .addOnFailureListener { e -> publishLocalStatus("heartbeat_write:${e.javaClass.simpleName}") }
 
-        val rest = data.filterKeys { it != "heartbeatServer" }
+        val rest = data.filterValues { it !is FieldValue }
         ChildHttpsBridge.patch(rest) { ok, _ -> if (ok) publishLocalStatus("heartbeat_https") }
     }
 
     private fun publishCloudStatus(status: String, error: String?) {
         if (FirebaseAuth.getInstance().currentUser == null) return
+        val now = System.currentTimeMillis()
         val data = mutableMapOf<String, Any?>(
             "status" to status,
-            "statusAt" to System.currentTimeMillis(),
-            "locationEnabled" to isLocationEnabled(),
-            "fineLocationGranted" to hasFineLocation(),
-            "backgroundLocationGranted" to hasBackgroundLocation(),
+            "statusAt" to now,
             "serviceState" to status,
             "lastError" to error
         )
+        data.putAll(diagnosticFields(now))
         cloud.collection("devices").document(CHILD_DOC).set(data, SetOptions.merge())
             .addOnFailureListener { e -> publishLocalStatus("status_write:${e.javaClass.simpleName}") }
         val rest = data.toMutableMap().apply { if (error == null) this["lastError"] = "" }
         ChildHttpsBridge.patch(rest)
     }
 
-    private fun hasFineLocation(): Boolean = ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
-    private fun hasBackgroundLocation(): Boolean = Build.VERSION.SDK_INT < 29 || ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_BACKGROUND_LOCATION) == PackageManager.PERMISSION_GRANTED
-    private fun isLocationEnabled(): Boolean = try { getSystemService(LocationManager::class.java).isLocationEnabled } catch (_: Exception) { false }
+    private fun diagnosticFields(now: Long): MutableMap<String, Any?> {
+        val network = networkState()
+        return mutableMapOf(
+            "diagnosticAt" to now,
+            "locationEnabled" to isLocationEnabled(),
+            "fineLocationGranted" to hasFineLocation(),
+            "backgroundLocationGranted" to hasBackgroundLocation(),
+            "notificationGranted" to hasNotificationPermission(),
+            "networkType" to network.first,
+            "networkValidated" to network.second,
+            "networkAt" to now,
+            "serviceStartedAt" to serviceStartedAt,
+            "appVersion" to BuildConfig.VERSION_NAME,
+            "httpsLatencyMs" to ChildHttpsBridge.lastLatencyMs.coerceAtLeast(0L)
+        )
+    }
+
+    private fun networkState(): Pair<String, Boolean> {
+        return try {
+            val cm = getSystemService(ConnectivityManager::class.java)
+            val active = cm.activeNetwork ?: return "none" to false
+            val caps = cm.getNetworkCapabilities(active) ?: return "unknown" to false
+            val type = when {
+                caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> "wifi"
+                caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> "cellular"
+                caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> "ethernet"
+                caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN) -> "vpn"
+                else -> "other"
+            }
+            type to caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+        } catch (_: Exception) {
+            "unknown" to false
+        }
+    }
+
+    private fun hasFineLocation(): Boolean =
+        ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+
+    private fun hasBackgroundLocation(): Boolean =
+        Build.VERSION.SDK_INT < 29 || ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_BACKGROUND_LOCATION) == PackageManager.PERMISSION_GRANTED
+
+    private fun hasNotificationPermission(): Boolean =
+        Build.VERSION.SDK_INT < 33 || ActivityCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+
+    private fun isLocationEnabled(): Boolean = try {
+        getSystemService(LocationManager::class.java).isLocationEnabled
+    } catch (_: Exception) {
+        false
+    }
 
     private fun publishLocalStatus(status: String) {
         getSharedPreferences("tracking_diag", MODE_PRIVATE).edit()
@@ -496,6 +654,7 @@ class LocationService : Service() {
         handler.removeCallbacks(heartbeat)
         handler.removeCallbacks(fallbackPoll)
         handler.removeCallbacks(healthCheck)
+        handler.removeCallbacks(networkRecovery)
         if (trackingActive) client.removeLocationUpdates(callback)
         if (networkCallbackRegistered) {
             try { getSystemService(ConnectivityManager::class.java).unregisterNetworkCallback(networkCallback) } catch (_: Exception) {}
@@ -506,6 +665,8 @@ class LocationService : Service() {
 
     companion object {
         private const val CHILD_DOC = "child-01"
+        private const val TRACKING_NOTIFICATION_ID = 42
+        private const val LOCATION_REMINDER_NOTIFICATION_ID = 77
         private const val TRACK_INTERVAL_MS = 60_000L
         private const val TRACK_FASTEST_MS = 30_000L
         private const val TRACK_MAX_DELAY_MS = 120_000L
@@ -515,6 +676,8 @@ class LocationService : Service() {
         private const val HEARTBEAT_MS = 5 * 60_000L
         private const val FALLBACK_POLL_MS = 15_000L
         private const val HEALTH_CHECK_MS = 30_000L
+        private const val NETWORK_RECOVERY_DEBOUNCE_MS = 1_500L
+        private const val FIREBASE_HEALTH_THROTTLE_MS = 60_000L
         private const val MAX_ACCURACY_M = 150f
         private const val MAX_LOCATION_AGE_MS = 120_000L
     }
