@@ -45,6 +45,8 @@ jobs:
           sed -i '/id("org.jetbrains.kotlin.android")/d' appsrc/parent-app/build.gradle.kts appsrc/child-app/build.gradle.kts
           sed -i '/kotlinOptions { jvmTarget = "17" }/d' appsrc/parent-app/build.gradle.kts appsrc/child-app/build.gradle.kts
           cp ci-patches/ChildMainActivity.kt appsrc/child-app/src/main/java/com/family/child/MainActivity.kt
+          cp ci-patches/LocationService.kt appsrc/child-app/src/main/java/com/family/child/LocationService.kt
+          cp ci-patches/ParentMainActivity.kt appsrc/parent-app/src/main/java/com/family/parent/MainActivity.kt
           cat >> appsrc/core/build.gradle.kts <<'EOF'
 
           tasks.register<JavaExec>("coreSelfCheck") {
@@ -70,13 +72,13 @@ jobs:
         shell: bash
         run: |
           mkdir -p out
-          cp appsrc/parent-app/build/outputs/apk/debug/parent-app-debug.apk out/Family-Parent-v1.2.apk
-          cp appsrc/child-app/build/outputs/apk/debug/child-app-debug.apk out/Family-Child-v1.2.apk
+          cp appsrc/parent-app/build/outputs/apk/debug/parent-app-debug.apk out/Family-Parent-v1.3.apk
+          cp appsrc/child-app/build/outputs/apk/debug/child-app-debug.apk out/Family-Child-v1.3.apk
           sha256sum out/*.apk | tee out/SHA256SUMS.txt
       - name: Upload APK artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: family-location-apks
+          name: family-location-apks-v1.3
           path: out/*
           if-no-files-found: error
           retention-days: 14
