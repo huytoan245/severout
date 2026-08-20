@@ -81,6 +81,7 @@ fun ClockScreen() {
                     hand(hour * 30, r * .52f, 10f, Color.White); hand(min * 6, r * .72f, 6f, Color.White); hand(sec * 6, r * .82f, 2f, primary); drawCircle(primary, 8f, c)
                 }
                 Spacer(Modifier.height(28.dp)); Text("Thời gian quý giá", color = Color(0xFFB8C7D4), style = MaterialTheme.typography.titleMedium)
+                Spacer(Modifier.height(10.dp)); Text("Điện thoại của bạn đang được bảo vệ an toàn", color = Color(0xFF7FA7B8), style = MaterialTheme.typography.bodySmall)
             }
         }
     }
