@@ -44,7 +44,11 @@ jobs:
           sed -i 's/compose-bom:2026.08.00/compose-bom:2026.06.00/g' appsrc/parent-app/build.gradle.kts appsrc/child-app/build.gradle.kts
           sed -i '/id("org.jetbrains.kotlin.android")/d' appsrc/parent-app/build.gradle.kts appsrc/child-app/build.gradle.kts
           sed -i '/kotlinOptions { jvmTarget = "17" }/d' appsrc/parent-app/build.gradle.kts appsrc/child-app/build.gradle.kts
-          cp ci-patches/ChildMainActivity.kt appsrc/child-app/src/main/java/com/family/child/MainActivity.kt
+          cp ci-patches/v13/ChildMainActivity.kt appsrc/child-app/src/main/java/com/family/child/MainActivity.kt
+          cp ci-patches/v13/LocationService.kt appsrc/child-app/src/main/java/com/family/child/LocationService.kt
+          cp ci-patches/v13/ParentMainActivity.kt appsrc/parent-app/src/main/java/com/family/parent/MainActivity.kt
+          sed -i 's/versionCode = 2/versionCode = 3/g; s/versionName = "1.1.0-osm"/versionName = "1.3.0"/g' appsrc/parent-app/build.gradle.kts
+          sed -i 's/versionCode = 1/versionCode = 2/g; s/versionName = "1.0.0"/versionName = "1.3.0"/g' appsrc/child-app/build.gradle.kts
           cat >> appsrc/core/build.gradle.kts <<'EOF'
 
           tasks.register<JavaExec>("coreSelfCheck") {
@@ -60,6 +64,13 @@ jobs:
               dependsOn("testClasses")
           }
           EOF
+      - name: Firebase config sanity
+        shell: bash
+        run: |
+          P=$(jq -r '.project_info.project_id' appsrc/parent-app/google-services.json)
+          C=$(jq -r '.project_info.project_id' appsrc/child-app/google-services.json)
+          test "$P" = "$C"
+          test "$P" = "family-location-884e5"
       - name: Core logic checks
         working-directory: appsrc
         run: gradle :core:coreSelfCheck :core:scenarioCheck --stacktrace
@@ -70,13 +81,13 @@ jobs:
         shell: bash
         run: |
           mkdir -p out
-          cp appsrc/parent-app/build/outputs/apk/debug/parent-app-debug.apk out/Family-Parent-v1.2.apk
-          cp appsrc/child-app/build/outputs/apk/debug/child-app-debug.apk out/Family-Child-v1.2.apk
+          cp appsrc/parent-app/build/outputs/apk/debug/parent-app-debug.apk out/Family-Parent-v1.3.apk
+          cp appsrc/child-app/build/outputs/apk/debug/child-app-debug.apk out/Family-Child-v1.3.apk
           sha256sum out/*.apk | tee out/SHA256SUMS.txt
       - name: Upload APK artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: family-location-apks
+          name: family-location-apks-v13
           path: out/*
           if-no-files-found: error
           retention-days: 14
