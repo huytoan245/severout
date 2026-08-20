@@ -1,0 +1,58 @@
+name: Extract Family Location Source
+
+on:
+  pull_request:
+    branches: [ master ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  extract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Restore source
+        shell: bash
+        run: |
+          cat apk-build/part*.txt > source.b64
+          base64 -d source.b64 > source.zip
+          unzip -q source.zip -d appsrc
+          cp ci-patches/ChildMainActivity.kt appsrc/child-app/src/main/java/com/family/child/MainActivity.kt
+          find appsrc -type f | sort > appsrc/FILELIST.txt
+      - name: Probe Firebase Anonymous Auth and Firestore read rules
+        shell: bash
+        run: |
+          set -euo pipefail
+          API_KEY=$(jq -r '.client[] | select(.client_info.android_client_info.package_name=="com.family.parent") | .api_key[0].current_key' appsrc/parent-app/google-services.json)
+          PROJECT_ID=$(jq -r '.project_info.project_id' appsrc/parent-app/google-services.json)
+          AUTH_JSON=$(curl -sS -X POST -H 'Content-Type: application/json' -d '{"returnSecureToken":true}' "https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=${API_KEY}")
+          TOKEN=$(printf '%s' "$AUTH_JSON" | jq -r '.idToken // empty')
+          if [ -z "$TOKEN" ]; then
+            echo "ANON_AUTH=FAILED"
+            printf '%s' "$AUTH_JSON" | jq -c '{error:.error.message}'
+            exit 0
+          fi
+          echo "ANON_AUTH=OK"
+          CODE=$(curl -sS -o firestore-response.json -w '%{http_code}' -H "Authorization: Bearer ${TOKEN}" "https://firestore.googleapis.com/v1/projects/${PROJECT_ID}/databases/(default)/documents/devices/child-01")
+          echo "FIRESTORE_READ_HTTP=${CODE}"
+          if [ "$CODE" != "200" ] && [ "$CODE" != "404" ]; then
+            jq -c '{error:.error.status,message:.error.message}' firestore-response.json || cat firestore-response.json
+          fi
+      - name: Package diagnostic source
+        shell: bash
+        run: |
+          mkdir -p diag
+          cp -R appsrc/parent-app diag/
+          cp -R appsrc/child-app diag/
+          cp -R appsrc/core diag/
+          cp appsrc/settings.gradle.kts diag/
+          cp appsrc/build.gradle.kts diag/
+          cp appsrc/gradle.properties diag/
+          cp appsrc/FILELIST.txt diag/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: family-location-diagnostic-source
+          path: diag
+          retention-days: 2
