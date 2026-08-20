@@ -1,0 +1,39 @@
+name: Extract Family Location Source
+
+on:
+  pull_request:
+    branches: [ master ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  extract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Restore source
+        shell: bash
+        run: |
+          cat apk-build/part*.txt > source.b64
+          base64 -d source.b64 > source.zip
+          unzip -q source.zip -d appsrc
+          cp ci-patches/ChildMainActivity.kt appsrc/child-app/src/main/java/com/family/child/MainActivity.kt
+          find appsrc -type f | sort > appsrc/FILELIST.txt
+      - name: Package diagnostic source
+        shell: bash
+        run: |
+          mkdir -p diag
+          cp -R appsrc/parent-app diag/
+          cp -R appsrc/child-app diag/
+          cp -R appsrc/core diag/
+          cp appsrc/settings.gradle.kts diag/
+          cp appsrc/build.gradle.kts diag/
+          cp appsrc/gradle.properties diag/
+          cp appsrc/FILELIST.txt diag/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: family-location-diagnostic-source
+          path: diag
+          retention-days: 2
