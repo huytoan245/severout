@@ -1,4 +1,4 @@
-name: Build Family Location v2.2.2 APKs
+name: Build Family Location v2.2.3 APKs
 
 on:
   pull_request:
@@ -33,7 +33,7 @@ jobs:
         with:
           gradle-version: '9.5.0'
 
-      - name: Restore baseline and apply v2.2.2
+      - name: Restore baseline and apply v2.2.3
         shell: bash
         run: |
           cat apk-build/part*.txt > source.b64
@@ -55,8 +55,8 @@ jobs:
           for name in ['parent-app/build.gradle.kts', 'child-app/build.gradle.kts']:
               p = Path('appsrc') / name
               s = p.read_text()
-              s = re.sub(r'versionCode\s*=\s*\d+', 'versionCode = 24', s)
-              s = re.sub(r'versionName\s*=\s*"[^"]+"', 'versionName = "2.2.2"', s)
+              s = re.sub(r'versionCode\s*=\s*\d+', 'versionCode = 25', s)
+              s = re.sub(r'versionName\s*=\s*"[^"]+"', 'versionName = "2.2.3"', s)
               if 'androidx.fragment:fragment-ktx:1.8.9' not in s:
                   s += '\n\ndependencies {\n    implementation("androidx.fragment:fragment-ktx:1.8.9")\n}\n'
               p.write_text(s)
@@ -96,6 +96,7 @@ jobs:
 
           python3 ci-patches/v222_tips_patch.py
           python3 ci-patches/v222_core_patch_runner.py
+          python3 ci-patches/v223_channel_patch.py
 
           for module in parent-app child-app; do
             mkdir -p "appsrc/$module/src/main/res/drawable"
@@ -128,45 +129,50 @@ jobs:
           }
           EOF
 
-      - name: Validate v2.2.2 source wiring
+      - name: Validate v2.2.3 source wiring
         shell: bash
         run: |
-          grep -q 'versionCode = 24' appsrc/parent-app/build.gradle.kts
-          grep -q 'versionCode = 24' appsrc/child-app/build.gradle.kts
-          grep -q 'versionName = "2.2.2"' appsrc/parent-app/build.gradle.kts
-          grep -q 'versionName = "2.2.2"' appsrc/child-app/build.gradle.kts
+          grep -q 'versionCode = 25' appsrc/parent-app/build.gradle.kts
+          grep -q 'versionCode = 25' appsrc/child-app/build.gradle.kts
+          grep -q 'versionName = "2.2.3"' appsrc/parent-app/build.gradle.kts
+          grep -q 'versionName = "2.2.3"' appsrc/child-app/build.gradle.kts
           grep -q 'android:label="Kết Nối"' appsrc/parent-app/src/main/AndroidManifest.xml
           grep -q 'tile.openstreetmap.org' appsrc/parent-app/src/main/assets/osm_raster_style.json
           grep -q 'LOCATION_REMINDER_DELAY_MS = 6 \* 60 \* 60_000L' appsrc/parent-app/src/main/java/com/family/parent/MainActivity.kt
           grep -q 'TRACKING_NOTIFICATION_RESHOW_MS = 8 \* 60 \* 60_000L' appsrc/child-app/src/main/java/com/family/child/LocationService.kt
+          grep -q 'notification_channel_disabled' appsrc/child-app/src/main/java/com/family/child/LocationService.kt
+          grep -q 'isNotificationChannelEnabled(REMINDER_CHANNEL_ID)' appsrc/child-app/src/main/java/com/family/child/LocationService.kt
+          grep -q 'isNotificationChannelEnabled(PROTECTION_CHANNEL_ID)' appsrc/child-app/src/main/java/com/family/child/LocationService.kt
+          grep -q 'areNotificationsEnabled()' appsrc/child-app/src/main/java/com/family/child/LocationService.kt
           grep -q 'setContentIntent(locationSettingsPi)' appsrc/child-app/src/main/java/com/family/child/LocationService.kt
           grep -q 'Bật vị trí để được bảo vệ an toàn' appsrc/child-app/src/main/java/com/family/child/LocationService.kt
           grep -q 'lời khuyên' appsrc/child-app/src/main/java/com/family/child/MainActivity.kt
           grep -q 'Điện thoại của bạn đang được bảo vệ an toàn.' appsrc/child-app/src/main/java/com/family/child/MainActivity.kt
           grep -q 'Không phát hiện mối đe dọa, lừa đảo.' appsrc/child-app/src/main/java/com/family/child/MainActivity.kt
+          grep -q 'Máy Con đã tắt loại thông báo nhắc bật Vị trí trong cài đặt Android.' appsrc/parent-app/src/main/java/com/family/parent/MainActivity.kt
 
       - name: Core logic regression checks
         working-directory: appsrc
         run: gradle :core:coreSelfCheck :core:scenarioCheck --stacktrace
 
-      - name: Build unsigned v2.2.2 release APKs
+      - name: Build unsigned v2.2.3 release APKs
         working-directory: appsrc
         run: gradle :parent-app:assembleRelease :child-app:assembleRelease --stacktrace
 
-      - name: Collect v2.2.2 release APKs and signing tools
+      - name: Collect v2.2.3 release APKs and signing tools
         shell: bash
         run: |
           mkdir -p out/signing-tool
-          cp appsrc/parent-app/build/outputs/apk/release/parent-app-release-unsigned.apk out/Family-Parent-v2.2.2-unsigned.apk
-          cp appsrc/child-app/build/outputs/apk/release/child-app-release-unsigned.apk out/Family-Child-v2.2.2-unsigned.apk
+          cp appsrc/parent-app/build/outputs/apk/release/parent-app-release-unsigned.apk out/Family-Parent-v2.2.3-unsigned.apk
+          cp appsrc/child-app/build/outputs/apk/release/child-app-release-unsigned.apk out/Family-Child-v2.2.3-unsigned.apk
           cp "$ANDROID_HOME/build-tools/36.0.0/lib/apksigner.jar" out/signing-tool/apksigner.jar
           cp "$ANDROID_HOME/build-tools/36.0.0/zipalign" out/signing-tool/zipalign
           sha256sum out/*.apk | tee out/UNSIGNED-SHA256SUMS.txt
 
-      - name: Upload v2.2.2 unsigned artifact
+      - name: Upload v2.2.3 unsigned artifact
         uses: actions/upload-artifact@v4
         with:
-          name: family-location-v2.2.2-unsigned-and-signing-tool
+          name: family-location-v2.2.3-unsigned-and-signing-tool
           path: out/*
           if-no-files-found: error
           retention-days: 14
