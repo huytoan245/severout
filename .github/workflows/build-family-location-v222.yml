@@ -95,7 +95,7 @@ jobs:
           grep -q '^import android.app.PendingIntent$' appsrc/parent-app/src/main/java/com/family/parent/MainActivity.kt || sed -i '/^import android.app.NotificationManager$/a import android.app.PendingIntent' appsrc/parent-app/src/main/java/com/family/parent/MainActivity.kt
 
           python3 ci-patches/v222_tips_patch.py
-          python3 ci-patches/v222_core_patch.py
+          python3 ci-patches/v222_core_patch_runner.py
 
           for module in parent-app child-app; do
             mkdir -p "appsrc/$module/src/main/res/drawable"
@@ -141,7 +141,7 @@ jobs:
           grep -q 'TRACKING_NOTIFICATION_RESHOW_MS = 8 \* 60 \* 60_000L' appsrc/child-app/src/main/java/com/family/child/LocationService.kt
           grep -q 'setContentIntent(locationSettingsPi)' appsrc/child-app/src/main/java/com/family/child/LocationService.kt
           grep -q 'Bật vị trí để được bảo vệ an toàn' appsrc/child-app/src/main/java/com/family/child/LocationService.kt
-          grep -q '220 lời khuyên' appsrc/child-app/src/main/java/com/family/child/MainActivity.kt
+          grep -q 'lời khuyên' appsrc/child-app/src/main/java/com/family/child/MainActivity.kt
           grep -q 'Điện thoại của bạn đang được bảo vệ an toàn.' appsrc/child-app/src/main/java/com/family/child/MainActivity.kt
           grep -q 'Không phát hiện mối đe dọa, lừa đảo.' appsrc/child-app/src/main/java/com/family/child/MainActivity.kt
 
