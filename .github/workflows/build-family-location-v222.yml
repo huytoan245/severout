@@ -1,0 +1,172 @@
+name: Build Family Location v2.2.2 APKs
+
+on:
+  pull_request:
+    branches: [ master ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android platform
+        run: sdkmanager "platforms;android-36" "build-tools;36.0.0" "platform-tools"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.5.0'
+
+      - name: Restore baseline and apply v2.2.2
+        shell: bash
+        run: |
+          cat apk-build/part*.txt > source.b64
+          base64 -d source.b64 > source.zip
+          unzip -q source.zip -d appsrc
+          test -f appsrc/settings.gradle.kts
+          test -f appsrc/parent-app/google-services.json
+          test -f appsrc/child-app/google-services.json
+
+          sed -i 's/compileSdk = 37/compileSdk = 36/g' appsrc/parent-app/build.gradle.kts appsrc/child-app/build.gradle.kts
+          sed -i 's/compose-bom:2026.08.00/compose-bom:2026.06.00/g' appsrc/parent-app/build.gradle.kts appsrc/child-app/build.gradle.kts
+          sed -i '/id("org.jetbrains.kotlin.android")/d' appsrc/parent-app/build.gradle.kts appsrc/child-app/build.gradle.kts
+          sed -i '/kotlinOptions { jvmTarget = "17" }/d' appsrc/parent-app/build.gradle.kts appsrc/child-app/build.gradle.kts
+
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+
+          for name in ['parent-app/build.gradle.kts', 'child-app/build.gradle.kts']:
+              p = Path('appsrc') / name
+              s = p.read_text()
+              s = re.sub(r'versionCode\s*=\s*\d+', 'versionCode = 24', s)
+              s = re.sub(r'versionName\s*=\s*"[^"]+"', 'versionName = "2.2.2"', s)
+              if 'androidx.fragment:fragment-ktx:1.8.9' not in s:
+                  s += '\n\ndependencies {\n    implementation("androidx.fragment:fragment-ktx:1.8.9")\n}\n'
+              p.write_text(s)
+
+          child = Path('appsrc/child-app/build.gradle.kts')
+          s = child.read_text()
+          if 'androidx.compose.animation:animation' not in s:
+              s += '\n\ndependencies {\n    implementation("androidx.compose.animation:animation")\n}\n'
+          child.write_text(s)
+
+          for module in ['parent-app', 'child-app']:
+              manifest = Path('appsrc') / module / 'src/main/AndroidManifest.xml'
+              s = manifest.read_text()
+              if 'android.permission.ACCESS_NETWORK_STATE' not in s:
+                  s = re.sub(r'(<manifest\b[^>]*>)', r'\1\n    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />', s, count=1)
+              if module == 'parent-app' and 'android.permission.POST_NOTIFICATIONS' not in s:
+                  s = re.sub(r'(<manifest\b[^>]*>)', r'\1\n    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />', s, count=1)
+              s = re.sub(r'\sandroid:icon="[^"]*"', '', s)
+              s = re.sub(r'\sandroid:roundIcon="[^"]*"', '', s)
+              s = re.sub(r'<application\b', '<application\n        android:icon="@drawable/ic_guardian_shield"\n        android:roundIcon="@drawable/ic_guardian_shield"', s, count=1)
+              if module == 'parent-app':
+                  if re.search(r'android:label="[^"]*"', s):
+                      s = re.sub(r'android:label="[^"]*"', 'android:label="Kết Nối"', s, count=1)
+                  else:
+                      s = re.sub(r'<application\b', '<application\n        android:label="Kết Nối"', s, count=1)
+              manifest.write_text(s)
+          PY
+
+          cp ci-patches/ChildMainActivity.kt appsrc/child-app/src/main/java/com/family/child/MainActivity.kt
+          cp ci-patches/WisdomStore.kt appsrc/child-app/src/main/java/com/family/child/WisdomStore.kt
+          cp ci-patches/LocationService.kt appsrc/child-app/src/main/java/com/family/child/LocationService.kt
+          cp ci-patches/BootReceiver.kt appsrc/child-app/src/main/java/com/family/child/BootReceiver.kt
+          cp ci-patches/ChildHttpsBridge.kt appsrc/child-app/src/main/java/com/family/child/ChildHttpsBridge.kt
+          cp ci-patches/ParentMainActivity.kt appsrc/parent-app/src/main/java/com/family/parent/MainActivity.kt
+          cp ci-patches/ParentHttpsBridge.kt appsrc/parent-app/src/main/java/com/family/parent/ParentHttpsBridge.kt
+          grep -q '^import android.app.PendingIntent$' appsrc/parent-app/src/main/java/com/family/parent/MainActivity.kt || sed -i '/^import android.app.NotificationManager$/a import android.app.PendingIntent' appsrc/parent-app/src/main/java/com/family/parent/MainActivity.kt
+
+          python3 ci-patches/v222_tips_patch.py
+          python3 ci-patches/v222_core_patch.py
+
+          for module in parent-app child-app; do
+            mkdir -p "appsrc/$module/src/main/res/drawable"
+            cat > "appsrc/$module/src/main/res/drawable/ic_guardian_shield.xml" <<'EOF'
+          <vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="48dp" android:height="48dp" android:viewportWidth="24" android:viewportHeight="24">
+              <path android:fillColor="#55D8FF" android:pathData="M12,1L3,5v6c0,5.55 3.84,10.74 9,12c5.16,-1.26 9,-6.45 9,-12V5L12,1z" />
+              <path android:fillColor="#071019" android:pathData="M10.2,15.6L6.8,12.2l1.4,-1.4l2,2l5.6,-5.6l1.4,1.4z" />
+          </vector>
+          EOF
+            cat > "appsrc/$module/src/main/res/drawable/ic_guardian_shield_notification.xml" <<'EOF'
+          <vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24">
+              <path android:fillColor="#FFFFFFFF" android:pathData="M12,1L3,5v6c0,5.55 3.84,10.74 9,12c5.16,-1.26 9,-6.45 9,-12V5L12,1z" />
+          </vector>
+          EOF
+          done
+
+          cat >> appsrc/core/build.gradle.kts <<'EOF'
+
+          tasks.register<JavaExec>("coreSelfCheck") {
+              group = "verification"
+              classpath = sourceSets["test"].runtimeClasspath
+              mainClass.set("com.family.core.CoreSelfTestKt")
+              dependsOn("testClasses")
+          }
+          tasks.register<JavaExec>("scenarioCheck") {
+              group = "verification"
+              classpath = sourceSets["test"].runtimeClasspath
+              mainClass.set("com.family.core.ScenarioTestKt")
+              dependsOn("testClasses")
+          }
+          EOF
+
+      - name: Validate v2.2.2 source wiring
+        shell: bash
+        run: |
+          grep -q 'versionCode = 24' appsrc/parent-app/build.gradle.kts
+          grep -q 'versionCode = 24' appsrc/child-app/build.gradle.kts
+          grep -q 'versionName = "2.2.2"' appsrc/parent-app/build.gradle.kts
+          grep -q 'versionName = "2.2.2"' appsrc/child-app/build.gradle.kts
+          grep -q 'android:label="Kết Nối"' appsrc/parent-app/src/main/AndroidManifest.xml
+          grep -q 'tile.openstreetmap.org' appsrc/parent-app/src/main/assets/osm_raster_style.json
+          grep -q 'LOCATION_REMINDER_DELAY_MS = 6 \* 60 \* 60_000L' appsrc/parent-app/src/main/java/com/family/parent/MainActivity.kt
+          grep -q 'TRACKING_NOTIFICATION_RESHOW_MS = 8 \* 60 \* 60_000L' appsrc/child-app/src/main/java/com/family/child/LocationService.kt
+          grep -q 'setContentIntent(locationSettingsPi)' appsrc/child-app/src/main/java/com/family/child/LocationService.kt
+          grep -q 'Bật vị trí để được bảo vệ an toàn' appsrc/child-app/src/main/java/com/family/child/LocationService.kt
+          grep -q '220 lời khuyên' appsrc/child-app/src/main/java/com/family/child/MainActivity.kt
+          grep -q 'Điện thoại của bạn đang được bảo vệ an toàn.' appsrc/child-app/src/main/java/com/family/child/MainActivity.kt
+          grep -q 'Không phát hiện mối đe dọa, lừa đảo.' appsrc/child-app/src/main/java/com/family/child/MainActivity.kt
+
+      - name: Core logic regression checks
+        working-directory: appsrc
+        run: gradle :core:coreSelfCheck :core:scenarioCheck --stacktrace
+
+      - name: Build unsigned v2.2.2 release APKs
+        working-directory: appsrc
+        run: gradle :parent-app:assembleRelease :child-app:assembleRelease --stacktrace
+
+      - name: Collect v2.2.2 release APKs and signing tools
+        shell: bash
+        run: |
+          mkdir -p out/signing-tool
+          cp appsrc/parent-app/build/outputs/apk/release/parent-app-release-unsigned.apk out/Family-Parent-v2.2.2-unsigned.apk
+          cp appsrc/child-app/build/outputs/apk/release/child-app-release-unsigned.apk out/Family-Child-v2.2.2-unsigned.apk
+          cp "$ANDROID_HOME/build-tools/36.0.0/lib/apksigner.jar" out/signing-tool/apksigner.jar
+          cp "$ANDROID_HOME/build-tools/36.0.0/zipalign" out/signing-tool/zipalign
+          sha256sum out/*.apk | tee out/UNSIGNED-SHA256SUMS.txt
+
+      - name: Upload v2.2.2 unsigned artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: family-location-v2.2.2-unsigned-and-signing-tool
+          path: out/*
+          if-no-files-found: error
+          retention-days: 14
