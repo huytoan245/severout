@@ -1,8 +1,6 @@
-name: Build Family Location v2.2 APKs
+name: Build Family Location v2.2.1 APKs
 
 on:
-  push:
-    branches: [ master ]
   pull_request:
     branches: [ master ]
   workflow_dispatch:
@@ -35,7 +33,7 @@ jobs:
         with:
           gradle-version: '9.5.0'
 
-      - name: Restore project source
+      - name: Restore v2.2 baseline and apply v2.2.1 version
         shell: bash
         run: |
           cat apk-build/part*.txt > source.b64
@@ -53,34 +51,37 @@ jobs:
           python3 - <<'PY'
           import re
           from pathlib import Path
-          for name in ['parent-app/build.gradle.kts','child-app/build.gradle.kts']:
-              p=Path('appsrc')/name
-              s=p.read_text()
-              s=re.sub(r'versionCode\s*=\s*\d+', 'versionCode = 22', s)
-              s=re.sub(r'versionName\s*=\s*"[^"]+"', 'versionName = "2.2.0"', s)
+
+          for name in ['parent-app/build.gradle.kts', 'child-app/build.gradle.kts']:
+              p = Path('appsrc') / name
+              s = p.read_text()
+              s = re.sub(r'versionCode\s*=\s*\d+', 'versionCode = 23', s)
+              s = re.sub(r'versionName\s*=\s*"[^"]+"', 'versionName = "2.2.1"', s)
               if 'androidx.fragment:fragment-ktx:1.8.9' not in s:
                   s += '\n\ndependencies {\n    implementation("androidx.fragment:fragment-ktx:1.8.9")\n}\n'
               p.write_text(s)
-          child=Path('appsrc/child-app/build.gradle.kts')
-          s=child.read_text()
+
+          child = Path('appsrc/child-app/build.gradle.kts')
+          s = child.read_text()
           if 'androidx.compose.animation:animation' not in s:
               s += '\n\ndependencies {\n    implementation("androidx.compose.animation:animation")\n}\n'
           child.write_text(s)
+
           for module in ['parent-app', 'child-app']:
-              manifest=Path('appsrc')/module/'src/main/AndroidManifest.xml'
-              s=manifest.read_text()
+              manifest = Path('appsrc') / module / 'src/main/AndroidManifest.xml'
+              s = manifest.read_text()
               if 'android.permission.ACCESS_NETWORK_STATE' not in s:
-                  s=re.sub(r'(<manifest\b[^>]*>)', r'\1\n    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />', s, count=1)
+                  s = re.sub(r'(<manifest\b[^>]*>)', r'\1\n    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />', s, count=1)
               if module == 'parent-app' and 'android.permission.POST_NOTIFICATIONS' not in s:
-                  s=re.sub(r'(<manifest\b[^>]*>)', r'\1\n    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />', s, count=1)
-              s=re.sub(r'\sandroid:icon="[^"]*"', '', s)
-              s=re.sub(r'\sandroid:roundIcon="[^"]*"', '', s)
-              s=re.sub(r'<application\b', '<application\n        android:icon="@drawable/ic_guardian_shield"\n        android:roundIcon="@drawable/ic_guardian_shield"', s, count=1)
+                  s = re.sub(r'(<manifest\b[^>]*>)', r'\1\n    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />', s, count=1)
+              s = re.sub(r'\sandroid:icon="[^"]*"', '', s)
+              s = re.sub(r'\sandroid:roundIcon="[^"]*"', '', s)
+              s = re.sub(r'<application\b', '<application\n        android:icon="@drawable/ic_guardian_shield"\n        android:roundIcon="@drawable/ic_guardian_shield"', s, count=1)
               if module == 'parent-app':
                   if re.search(r'android:label="[^"]*"', s):
-                      s=re.sub(r'android:label="[^"]*"', 'android:label="Kết Nối"', s, count=1)
+                      s = re.sub(r'android:label="[^"]*"', 'android:label="Kết Nối"', s, count=1)
                   else:
-                      s=re.sub(r'<application\b', '<application\n        android:label="Kết Nối"', s, count=1)
+                      s = re.sub(r'<application\b', '<application\n        android:label="Kết Nối"', s, count=1)
               manifest.write_text(s)
           PY
 
@@ -124,39 +125,39 @@ jobs:
           }
           EOF
 
-      - name: Validate source wiring
+      - name: Validate v2.2.1 source wiring
         shell: bash
         run: |
           test -f appsrc/child-app/src/main/java/com/family/child/WisdomStore.kt
-          grep -q 'versionName = "2.2.0"' appsrc/parent-app/build.gradle.kts
-          grep -q 'versionName = "2.2.0"' appsrc/child-app/build.gradle.kts
-          grep -q 'androidx.fragment:fragment-ktx:1.8.9' appsrc/parent-app/build.gradle.kts
-          grep -q 'androidx.fragment:fragment-ktx:1.8.9' appsrc/child-app/build.gradle.kts
+          grep -q 'versionCode = 23' appsrc/parent-app/build.gradle.kts
+          grep -q 'versionCode = 23' appsrc/child-app/build.gradle.kts
+          grep -q 'versionName = "2.2.1"' appsrc/parent-app/build.gradle.kts
+          grep -q 'versionName = "2.2.1"' appsrc/child-app/build.gradle.kts
           grep -q 'android:label="Kết Nối"' appsrc/parent-app/src/main/AndroidManifest.xml
           grep -q 'tile.openstreetmap.org' appsrc/parent-app/src/main/assets/osm_raster_style.json
 
-      - name: Core logic checks
+      - name: Core logic regression checks
         working-directory: appsrc
         run: gradle :core:coreSelfCheck :core:scenarioCheck --stacktrace
 
-      - name: Build unsigned release APKs
+      - name: Build unsigned v2.2.1 release APKs
         working-directory: appsrc
         run: gradle :parent-app:assembleRelease :child-app:assembleRelease --stacktrace
 
-      - name: Collect release APKs
+      - name: Collect v2.2.1 release APKs and signing tools
         shell: bash
         run: |
           mkdir -p out/signing-tool
-          cp appsrc/parent-app/build/outputs/apk/release/parent-app-release-unsigned.apk out/Family-Parent-v2.2-unsigned.apk
-          cp appsrc/child-app/build/outputs/apk/release/child-app-release-unsigned.apk out/Family-Child-v2.2-unsigned.apk
+          cp appsrc/parent-app/build/outputs/apk/release/parent-app-release-unsigned.apk out/Family-Parent-v2.2.1-unsigned.apk
+          cp appsrc/child-app/build/outputs/apk/release/child-app-release-unsigned.apk out/Family-Child-v2.2.1-unsigned.apk
           cp "$ANDROID_HOME/build-tools/36.0.0/lib/apksigner.jar" out/signing-tool/apksigner.jar
           cp "$ANDROID_HOME/build-tools/36.0.0/zipalign" out/signing-tool/zipalign
           sha256sum out/*.apk | tee out/UNSIGNED-SHA256SUMS.txt
 
-      - name: Upload unsigned v2.2 build
+      - name: Upload v2.2.1 unsigned artifact
         uses: actions/upload-artifact@v4
         with:
-          name: family-location-v2.2-unsigned-and-signing-tool
+          name: family-location-v2.2.1-unsigned-and-signing-tool
           path: out/*
           if-no-files-found: error
           retention-days: 14
