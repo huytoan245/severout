@@ -98,7 +98,7 @@ jobs:
           python3 ci-patches/v222_core_patch_runner.py
           python3 ci-patches/v223_channel_patch.py
           python3 ci-patches/v224_offline_journey_patch.py
-          python3 ci-patches/v225_cellular_failover_patch.py
+          python3 ci-patches/v225_cellular_failover_patch_runner.py
 
           for module in parent-app child-app; do
             mkdir -p "appsrc/$module/src/main/res/drawable"
@@ -145,6 +145,8 @@ jobs:
           grep -q 'WIFI_FAILURES_TO_FAILOVER = 3' appsrc/child-app/src/main/java/com/family/child/NetworkFailoverManager.kt
           grep -q 'WIFI_RECOVERY_SUCCESSES = 3' appsrc/child-app/src/main/java/com/family/child/NetworkFailoverManager.kt
           grep -q 'CELLULAR_MIN_HOLD_MS = 2 \* 60_000L' appsrc/child-app/src/main/java/com/family/child/NetworkFailoverManager.kt
+          grep -q 'reason = "cellular_lost"' appsrc/child-app/src/main/java/com/family/child/NetworkFailoverManager.kt
+          grep -q 'RejectedExecutionException' appsrc/child-app/src/main/java/com/family/child/NetworkFailoverManager.kt
           grep -q 'restartCloudAfterRouteChange' appsrc/child-app/src/main/java/com/family/child/LocationService.kt
           grep -q 'cellularFailoverActive' appsrc/child-app/src/main/java/com/family/child/LocationService.kt
           grep -q 'routeMode' appsrc/parent-app/src/main/java/com/family/parent/ParentHttpsBridge.kt
