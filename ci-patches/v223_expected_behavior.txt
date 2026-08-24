@@ -1,0 +1,11 @@
+v2.2.3 regression expectations
+
+1. If all notifications are disabled for Child, a Parent-triggered Location reminder must ACK notification_permission_missing.
+2. If app notifications are allowed but reminder channel is disabled, ACK notification_channel_disabled.
+3. Parent must not display the reminder as shown for either blocked case.
+4. If protection channel is disabled, the eight-hour silent re-post must not be attempted.
+5. If Location changes OFF -> ON and protection channel is enabled, restore the quiet protection notification immediately.
+6. If Location changes OFF -> ON and protection channel is disabled, respect the user's Android channel choice.
+7. Six-hour continuous Location-off threshold remains unchanged.
+8. Full reminder notification tap still opens Android Location settings.
+9. Existing protection text and scam-prevention tips remain unchanged.
