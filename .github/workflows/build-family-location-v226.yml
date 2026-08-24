@@ -100,7 +100,7 @@ jobs:
           python3 ci-patches/v222_core_patch_runner.py
           python3 ci-patches/v223_channel_patch.py
           python3 ci-patches/v224_offline_journey_patch.py
-          python3 ci-patches/v225_cellular_failover_patch.py
+          python3 ci-patches/v225_cellular_failover_patch_runner.py
           python3 ci-patches/v226_service_survival_patch.py
 
           for module in parent-app child-app; do
@@ -153,6 +153,8 @@ jobs:
           grep -q 'Dịch vụ Máy Con có thể đã dừng' appsrc/parent-app/src/main/java/com/family/parent/MainActivity.kt
           grep -q 'Bật · ${age(assessment.lastContactAt)} trước' appsrc/parent-app/src/main/java/com/family/parent/MainActivity.kt
           grep -q 'bindProcessToNetwork(network)' appsrc/child-app/src/main/java/com/family/child/NetworkFailoverManager.kt
+          grep -q 'reason = "cellular_lost"' appsrc/child-app/src/main/java/com/family/child/NetworkFailoverManager.kt
+          grep -q 'RejectedExecutionException' appsrc/child-app/src/main/java/com/family/child/NetworkFailoverManager.kt
           grep -q 'queueNetworkEvent("network_offline"' appsrc/child-app/src/main/java/com/family/child/LocationService.kt
           grep -q 'ChildHttpsBridge.patchEvent(documentId, m)' appsrc/child-app/src/main/java/com/family/child/LocationService.kt
           grep -q 'notification_channel_disabled' appsrc/child-app/src/main/java/com/family/child/LocationService.kt
