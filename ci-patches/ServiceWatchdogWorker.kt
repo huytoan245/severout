@@ -9,17 +9,22 @@ import android.os.Build
 import android.os.PowerManager
 import androidx.core.content.ContextCompat
 import androidx.work.ExistingPeriodicWorkPolicy
+import androidx.work.ExistingWorkPolicy
+import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.OutOfQuotaPolicy
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.Worker
 import androidx.work.WorkerParameters
+import androidx.work.workDataOf
 import java.util.concurrent.TimeUnit
 
 /**
- * Secondary survival layer. The Location foreground service remains the primary
- * execution path; this periodic worker only attempts recovery when the local
- * service heartbeat has gone stale. It never bypasses Force Stop or user power
- * restrictions.
+ * Secondary survival layer. LocationService remains the primary execution path.
+ * Periodic work detects a stale local heartbeat. One-shot expedited work is also
+ * requested when the service/task is removed by the system. Android may still
+ * reject recovery when the app is explicitly Force Stopped or background use is
+ * restricted by the user/system; those states are recorded instead of hidden.
  */
 class ServiceWatchdogWorker(
     appContext: Context,
@@ -29,15 +34,20 @@ class ServiceWatchdogWorker(
     override fun doWork(): Result {
         val now = System.currentTimeMillis()
         val prefs = applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        val trigger = inputData.getString(KEY_RECOVERY_REASON) ?: "periodic"
         val lastLocalHeartbeatAt = prefs.getLong(KEY_LAST_LOCAL_HEARTBEAT_AT, 0L)
         val stale = lastLocalHeartbeatAt <= 0L || now - lastLocalHeartbeatAt >= LOCAL_HEARTBEAT_STALE_MS
 
         prefs.edit()
             .putLong(KEY_WATCHDOG_LAST_RUN_AT, now)
             .putBoolean(KEY_WATCHDOG_SAW_STALE_SERVICE, stale)
+            .putString(KEY_WATCHDOG_TRIGGER, trigger)
             .apply()
 
-        if (!stale) return Result.success()
+        // One-shot requests are intentionally allowed to recover immediately after
+        // onTaskRemoved/onDestroy, even if the previous heartbeat is still recent.
+        val recoveryRequested = trigger != "periodic"
+        if (!stale && !recoveryRequested) return Result.success()
 
         val fine = ContextCompat.checkSelfPermission(
             applicationContext,
@@ -65,6 +75,7 @@ class ServiceWatchdogWorker(
         return try {
             val intent = Intent(applicationContext, LocationService::class.java)
                 .putExtra(EXTRA_WATCHDOG_RECOVERY, true)
+                .putExtra(KEY_RECOVERY_REASON, trigger)
             ContextCompat.startForegroundService(applicationContext, intent)
             prefs.edit()
                 .putString(KEY_WATCHDOG_RESULT, "restart_requested")
@@ -90,19 +101,34 @@ class ServiceWatchdogWorker(
         const val KEY_WATCHDOG_SAW_STALE_SERVICE = "watchdog_saw_stale_service"
         const val KEY_WATCHDOG_RESTART_REQUESTED_AT = "watchdog_restart_requested_at"
         const val KEY_WATCHDOG_RESTART_FAILED_AT = "watchdog_restart_failed_at"
+        const val KEY_WATCHDOG_TRIGGER = "watchdog_trigger"
+        const val KEY_RECOVERY_REASON = "recovery_reason"
         const val KEY_BATTERY_OPTIMIZATION_IGNORED = "battery_optimization_ignored"
         const val KEY_BACKGROUND_RESTRICTED = "background_restricted"
         const val EXTRA_WATCHDOG_RECOVERY = "watchdog_recovery"
 
-        private const val UNIQUE_WORK = "family-location-service-watchdog"
+        private const val UNIQUE_PERIODIC_WORK = "family-location-service-watchdog"
+        private const val UNIQUE_IMMEDIATE_WORK = "family-location-service-recovery"
         private const val LOCAL_HEARTBEAT_STALE_MS = 7 * 60_000L
 
         fun schedule(context: Context) {
             val request = PeriodicWorkRequestBuilder<ServiceWatchdogWorker>(15, TimeUnit.MINUTES)
                 .build()
             WorkManager.getInstance(context.applicationContext).enqueueUniquePeriodicWork(
-                UNIQUE_WORK,
+                UNIQUE_PERIODIC_WORK,
                 ExistingPeriodicWorkPolicy.KEEP,
+                request
+            )
+        }
+
+        fun requestImmediateRecovery(context: Context, reason: String) {
+            val request = OneTimeWorkRequestBuilder<ServiceWatchdogWorker>()
+                .setInputData(workDataOf(KEY_RECOVERY_REASON to reason))
+                .setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
+                .build()
+            WorkManager.getInstance(context.applicationContext).enqueueUniqueWork(
+                UNIQUE_IMMEDIATE_WORK,
+                ExistingWorkPolicy.REPLACE,
                 request
             )
         }
