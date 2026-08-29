@@ -17,6 +17,7 @@ def replace_once(path, old, new):
 
 
 loc = "appsrc/child-app/src/main/java/com/family/child/LocationService.kt"
+network_manager = "appsrc/child-app/src/main/java/com/family/child/NetworkFailoverManager.kt"
 manifest_path = "appsrc/child-app/src/main/AndroidManifest.xml"
 wake_dst = Path("appsrc/child-app/src/main/java/com/family/child/ChildWakeMessagingService.kt")
 wake_src = Path("ci-patches/ChildWakeMessagingService.kt")
@@ -124,9 +125,13 @@ checks = {
         'processRefreshRequest(requestId, "fcm")',
         'fcmWakeReceivedAt',
         'return START_STICKY',
-        'bindProcessToNetwork(network)',
         'queueNetworkEvent("network_offline"',
         'ChildHttpsBridge.patchEvent(documentId, m)',
+    ],
+    network_manager: [
+        'bindProcessToNetwork(network)',
+        'TRANSPORT_CELLULAR',
+        'unregisterNetworkCallback',
     ],
 }
 for path, needles in checks.items():
