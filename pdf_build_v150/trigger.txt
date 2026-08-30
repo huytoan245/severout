@@ -1,0 +1,1 @@
+Trigger isolated Windows build for Chinh-Sua-File-PDF v1.5.0.
