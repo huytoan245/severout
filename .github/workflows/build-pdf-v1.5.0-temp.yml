@@ -1,0 +1,140 @@
+name: Build Chinh sua file PDF v1.5.0 Windows Offline
+
+on:
+  push:
+    branches:
+      - build-pdf-v1.5.0-temp-20260830
+    paths:
+      - 'pdf_build_v150/**'
+      - '.github/workflows/build-pdf-v1.5.0-temp.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout isolated v1.5 build branch
+        uses: actions/checkout@v4
+
+      - name: Reconstruct exact v1.5.0 source
+        shell: pwsh
+        run: |
+          $paths = @(
+            'pdf_build_v150/part00.b64',
+            'pdf_build_v150/part01.b64',
+            'pdf_build_v150/part02.b64',
+            'pdf_build_v150/part03.b64'
+          )
+          foreach ($p in $paths) { if (-not (Test-Path $p)) { throw "Missing payload: $p" } }
+          $parts = $paths | ForEach-Object { Get-Content $_ -Raw }
+          $b64 = [string]::Concat([string[]]$parts)
+          [IO.File]::WriteAllBytes('Chinh-Sua-File-PDF-Source-v1.5.0.zip', [Convert]::FromBase64String($b64))
+          $hash = (Get-FileHash 'Chinh-Sua-File-PDF-Source-v1.5.0.zip' -Algorithm SHA256).Hash.ToLower()
+          if ($hash -ne '6a3553152bd5470d179d92e0a079cb0045625ca6668aa48533b40f04b3451205') { throw "Source SHA256 mismatch: $hash" }
+          New-Item -ItemType Directory -Force -Path 'tools/chinh-sua-file-pdf-v1.5.0' | Out-Null
+          Expand-Archive -Path 'Chinh-Sua-File-PDF-Source-v1.5.0.zip' -DestinationPath 'tools/chinh-sua-file-pdf-v1.5.0' -Force
+          $version = Get-Content 'tools/chinh-sua-file-pdf-v1.5.0/pdf_scan_organizer/__init__.py' -Raw
+          if ($version -notmatch '1\.5\.0') { throw 'Version 1.5.0 missing in source' }
+
+      - name: Setup Python 3.12 x64
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          architecture: 'x64'
+
+      - name: Install build dependencies
+        shell: pwsh
+        working-directory: tools/chinh-sua-file-pdf-v1.5.0
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+
+      - name: Run regression tests
+        shell: pwsh
+        working-directory: tools/chinh-sua-file-pdf-v1.5.0
+        run: |
+          $env:PYTHONPATH = "."
+          python -m unittest discover -s tests -p 'test_*.py' -v
+
+      - name: Run GUI regression smoke
+        shell: pwsh
+        working-directory: tools/chinh-sua-file-pdf-v1.5.0
+        run: |
+          $env:PYTHONPATH = "."
+          python tests/gui_smoke.py
+
+      - name: Run Python bundled-logic self test
+        shell: pwsh
+        working-directory: tools/chinh-sua-file-pdf-v1.5.0
+        run: |
+          $env:PYTHONPATH = "."
+          python main.py --self-test
+
+      - name: Generate icon and Windows metadata
+        shell: pwsh
+        working-directory: tools/chinh-sua-file-pdf-v1.5.0
+        run: python build_assets.py
+
+      - name: Build single-file offline EXE
+        shell: pwsh
+        working-directory: tools/chinh-sua-file-pdf-v1.5.0
+        run: |
+          pyinstaller --noconfirm --clean --onefile --windowed `
+            --name "Chinh-Sua-File-PDF-v1.5.0" `
+            --icon "app.ico" `
+            --version-file "version_info.txt" `
+            --add-data "app.ico;." `
+            --collect-all pypdfium2 `
+            --hidden-import PIL._tkinter_finder `
+            main.py
+
+      - name: Self-test bundled EXE on Windows
+        shell: pwsh
+        working-directory: tools/chinh-sua-file-pdf-v1.5.0
+        run: |
+          $p = Start-Process -FilePath ".\dist\Chinh-Sua-File-PDF-v1.5.0.exe" -ArgumentList "--self-test" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "Bundled EXE self-test failed with exit code $($p.ExitCode)" }
+
+      - name: Prepare delivery package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path 'delivery-v150' | Out-Null
+          Copy-Item 'tools/chinh-sua-file-pdf-v1.5.0/dist/Chinh-Sua-File-PDF-v1.5.0.exe' 'delivery-v150/Chinh-Sua-File-PDF-v1.5.0.exe' -Force
+          Copy-Item 'Chinh-Sua-File-PDF-Source-v1.5.0.zip' 'delivery-v150/Chinh-Sua-File-PDF-Source-v1.5.0.zip' -Force
+          if (Test-Path 'tools/chinh-sua-file-pdf-v1.5.0/app-icon-preview.png') {
+            Copy-Item 'tools/chinh-sua-file-pdf-v1.5.0/app-icon-preview.png' 'delivery-v150/Chinh-Sua-File-PDF-v1.5.0-icon.png' -Force
+          }
+          $exeHash = (Get-FileHash 'delivery-v150/Chinh-Sua-File-PDF-v1.5.0.exe' -Algorithm SHA256).Hash.ToLower()
+          $srcHash = (Get-FileHash 'delivery-v150/Chinh-Sua-File-PDF-Source-v1.5.0.zip' -Algorithm SHA256).Hash.ToLower()
+          if ($srcHash -ne '6a3553152bd5470d179d92e0a079cb0045625ca6668aa48533b40f04b3451205') { throw "Delivery source hash changed: $srcHash" }
+          $report = @(
+            'Chỉnh sửa file PDF v1.5.0',
+            'Baseline: source v1.4.0 đã build/test thành công; SHA256 Source v1.4.0: 40a4802eafc28c7771c364371aeb5b5af7abdc5b87fa431e5b530bc7bf02df4f',
+            'Người thiết kế: Nguyễn Huy Toàn',
+            'Đơn vị: Văn phòng Đảng ủy xã Thanh Lâm',
+            'Điện thoại: 0979 928 450',
+            '',
+            'Added: phím Up/Down điều hướng danh sách file.',
+            'Added: phím Up/Down điều hướng danh sách trang; Ctrl+Up/Down di chuyển trang.',
+            'Added: menu chuột phải tại thumbnail để xoay, di chuyển, đảo thứ tự, xóa, Undo/Redo.',
+            'Changed: thu gọn banner trên cùng để tăng chiều cao 3 cột.',
+            'Changed: thông tin người thiết kế thành một dòng căn giữa và nổi bật.',
+            'Preserved: toàn bộ chức năng v1.4 gồm đảo trang, xoay, kéo-thả, xóa, Undo/Redo, ghép/tách, Save All, restore, backup riêng, atomic save và cleanup backup.',
+            '',
+            'Tests: 20 unit regression tests + GUI regression/smoke + Python self-test + bundled Windows EXE self-test.',
+            "SHA256 EXE: $exeHash",
+            "SHA256 Source ZIP: $srcHash"
+          )
+          $report | Set-Content -Encoding UTF8 'delivery-v150/BUILD-TEST-REPORT-v1.5.0.txt'
+          "$exeHash  Chinh-Sua-File-PDF-v1.5.0.exe`n$srcHash  Chinh-Sua-File-PDF-Source-v1.5.0.zip" | Set-Content -Encoding ASCII 'delivery-v150/SHA256SUMS-v1.5.0.txt'
+
+      - name: Upload v1.5.0 Windows offline package
+        uses: actions/upload-artifact@v4
+        with:
+          name: Chinh-Sua-File-PDF-v1.5.0-Windows-Offline
+          path: delivery-v150/*
+          if-no-files-found: error
+          retention-days: 30
