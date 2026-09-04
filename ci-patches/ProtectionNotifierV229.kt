@@ -11,12 +11,12 @@ import androidx.core.app.NotificationManagerCompat
 
 /**
  * User-visible but silent protection notification used before a background wake.
- * It intentionally contains no location/GPS wording. If LocationService starts,
- * its foreground notification replaces this notification using the same id.
+ * It intentionally contains no location/GPS wording. A separate notification id
+ * avoids replacing or timing out LocationService's foreground notification.
  */
 object ProtectionNotifier {
     private const val CHANNEL_ID = "protection"
-    private const val NOTIFICATION_ID = 42
+    private const val WAKE_NOTIFICATION_ID = 22942
     private const val PREFS = "tracking_diag"
 
     fun ensureVisible(context: Context, source: String): Boolean {
@@ -61,11 +61,11 @@ object ProtectionNotifier {
             .setSilent(true)
             .setOnlyAlertOnce(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)
-            .setTimeoutAfter(5 * 60_000L)
+            .setTimeoutAfter(90_000L)
             .build()
 
         return try {
-            manager.notify(NOTIFICATION_ID, notification)
+            manager.notify(WAKE_NOTIFICATION_ID, notification)
             app.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
                 .putLong("protection_wake_notification_at_v229", now)
                 .putString("protection_wake_notification_source_v229", source)
