@@ -1,0 +1,58 @@
+name: Build Family Location v2.2.10 reliability candidate
+on:
+  pull_request:
+    branches: [v229-always-alive-recovery]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: android-actions/setup-android@v3
+      - run: sdkmanager "platforms;android-36" "build-tools;36.0.0" "platform-tools"
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.5.0'
+      - name: Reconstruct audited baseline and append v2210
+        run: python3 -X utf8 scripts/reconstruct.py
+      - name: Backend regression
+        run: |
+          npm ci --prefix firebase-wake/functions --ignore-scripts
+          node --check firebase-wake/functions/index.js
+          node --test firebase-wake/functions/wake-handler.test.js
+          node -e 'require("./firebase-wake/functions/index.js")'
+      - name: Static product and recovery validation
+        run: python3 -X utf8 scripts/validate.py
+      - name: Core, atomic journal, Android build and lint
+        working-directory: appsrc
+        run: gradle :core:coreSelfCheck :core:scenarioCheck :child-app:testDebugUnitTest :parent-app:assembleRelease :child-app:assembleRelease :parent-app:lintRelease :child-app:lintRelease --console=plain --stacktrace
+      - name: Collect unsigned candidate
+        run: |
+          mkdir -p out
+          cp appsrc/parent-app/build/outputs/apk/release/parent-app-release-unsigned.apk out/Family-Parent-v2.2.10-unsigned.apk
+          cp appsrc/child-app/build/outputs/apk/release/child-app-release-unsigned.apk out/Family-Child-v2.2.10-unsigned.apk
+          cp -r firebase-wake docs scripts out/
+          sha256sum out/*.apk > out/SHA256SUMS.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: family-location-v2.2.10-unsigned-candidate
+          path: out/
+          retention-days: 14
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: family-location-v2.2.10-test-reports
+          path: |
+            appsrc/child-app/build/reports/tests/
+            appsrc/child-app/build/reports/lint-results-release.*
+            appsrc/parent-app/build/reports/lint-results-release.*

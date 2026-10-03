@@ -1,0 +1,8 @@
+appsrc/
+out/
+.gradle/
+__pycache__/
+*.jks
+*.keystore
+firebase-debug.log
+firebase-wake/functions/node_modules/
