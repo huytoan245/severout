@@ -100,8 +100,11 @@ edit(main,'wakeResult == "sent" -> "Đã gửi yêu cầu đánh thức Máy Con
 # Direct Worker replies cannot regress later Child progress.
 edit(main,'        val request = refreshRequestId\n        if (request <= 0L) return', '        val request = refreshRequestId\n        if (request <= 0L) return\n        if (ack == request || completed == request || failed == request) wakeProgressRank = maxOf(wakeProgressRank, 4)')
 edit(main,'"Đang lấy vị trí mới..."','"Đang lấy GPS mới..."',2)
-edit(main,'            repeat(15) { index ->\n                delay(3_000L)','            repeat(9) { index ->\n                delay(5_000L)')
-edit(main,'            repeat(15) {\n                delay(3_000L)','            repeat(9) {\n                delay(5_000L)')
+edit(main,'            repeat(15) { index ->\n                delay(3_000L)','            repeat(4) { index ->\n                delay(10_000L)')
+edit(main,'            repeat(15) {\n                delay(3_000L)','            repeat(4) {\n                delay(10_000L)')
+edit(main,'            if (refreshRequestId == request) {\n                refreshText = "Máy Con chưa phản hồi sau 45 giây"','            delay(5_000L)\n            if (refreshRequestId == request) {\n                refreshText = "Máy Con chưa phản hồi sau 45 giây"')
+edit(main,'            if (reminderRequestId == request) {\n                reminderText = "Chưa xác nhận','            delay(5_000L)\n            if (reminderRequestId == request) {\n                reminderText = "Chưa xác nhận')
+edit(main,'if (deviceFromCache || serverStale || refreshRequestId > 0L || reminderRequestId > 0L) {','if ((deviceFromCache || serverStale) && refreshRequestId == 0L && reminderRequestId == 0L) {')
 edit(main,'                    commandConfirmedFor = 0L\n                    refreshText', '                    commandConfirmedFor = 0L\n                    wakeProgressRank = 0\n                    val parentUid = FirebaseAuth.getInstance().currentUser?.uid ?: return@HomeScreen\n                    refreshText')
 edit(main,'val payload = mapOf<String, Any?>("refreshRequestedAt" to requestAt, "refreshExpiresAt" to requestAt + 15 * 60_000L)','val payload = mapOf<String, Any?>("refreshRequestedAt" to requestAt, "refreshExpiresAt" to requestAt + 15 * 60_000L, "refreshRequestedBy" to parentUid)')
 edit(main,'db.collection("devices").document(CHILD_DOC).set(payload, SetOptions.merge())\n                        .addOnSuccessListener {','ParentWakeBridge.prepareCommand(context, requestAt, parentUid)\n                        .addOnSuccessListener { written ->\n                            if (!written) return@addOnSuccessListener')
