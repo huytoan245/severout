@@ -1,0 +1,17 @@
+{
+  "name": "family-location-wake",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "test:runtime": "node test/runtime-smoke.mjs",
+    "check": "node --check src/worker.js",
+    "dry-run": "wrangler deploy --dry-run --outdir dist"
+  },
+  "devDependencies": {
+    "@firebase/rules-unit-testing": "5.0.2",
+    "firebase": "12.19.0",
+    "wrangler": "4.147.0"
+  },
+  "overrides": { "@grpc/grpc-js": "1.14.5" }
+}
