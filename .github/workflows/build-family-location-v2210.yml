@@ -41,7 +41,11 @@ jobs:
           mkdir -p out
           cp appsrc/parent-app/build/outputs/apk/release/parent-app-release-unsigned.apk out/Family-Parent-v2.2.10-unsigned.apk
           cp appsrc/child-app/build/outputs/apk/release/child-app-release-unsigned.apk out/Family-Child-v2.2.10-unsigned.apk
-          cp -r firebase-wake docs scripts out/
+          mkdir -p out/firebase-wake/functions
+          cp firebase-wake/firebase.json firebase-wake/deploy.ps1 out/firebase-wake/
+          cp firebase-wake/functions/*.js firebase-wake/functions/package*.json out/firebase-wake/functions/
+          cp -r docs scripts out/
+          git archive --format=zip --output=out/Family-Location-v2.2.10-Source.zip HEAD
           sha256sum out/*.apk > out/SHA256SUMS.txt
       - uses: actions/upload-artifact@v4
         with:
