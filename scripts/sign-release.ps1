@@ -2,7 +2,8 @@ param(
     [Parameter(Mandatory=$true)][string]$KeystorePath,
     [Parameter(Mandatory=$true)][string]$AndroidSdk,
     [Parameter(Mandatory=$true)][string]$JavaHome,
-    [string]$UnsignedDirectory = (Join-Path $PSScriptRoot '..\out')
+    [string]$UnsignedDirectory = (Join-Path $PSScriptRoot '..\out\v2211'),
+    [string]$Version = '2.2.11'
 )
 $ErrorActionPreference = 'Stop'
 if (-not (Test-Path -LiteralPath $KeystorePath)) { throw 'Existing release keystore not found. Do not generate a replacement signer.' }
@@ -14,7 +15,7 @@ $align = Join-Path $AndroidSdk 'build-tools\36.0.0\zipalign.exe'
 $stage = Join-Path $env:TEMP ('family-location-sign-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $stage | Out-Null
 foreach ($app in @('Parent','Child')) {
-    $inputApk = Join-Path $UnsignedDirectory "Family-$app-v2.2.10-unsigned.apk"
+    $inputApk = Join-Path $UnsignedDirectory "Family-$app-v$Version-unsigned.apk"
     Copy-Item -LiteralPath $inputApk -Destination (Join-Path $stage "$app-unsigned.apk")
     & $align -p -f 4 (Join-Path $stage "$app-unsigned.apk") (Join-Path $stage "$app-aligned.apk")
     if ($LASTEXITCODE -ne 0) { throw 'zipalign failed' }
@@ -27,7 +28,7 @@ foreach ($app in @('Parent','Child')) {
     if ($LASTEXITCODE -ne 0 -or -not ($verify -match "certificate SHA-256 digest: $expected")) { throw 'Signature verification failed or signer differs from v2.2.1+; signed output was not promoted.' }
     & $align -c -p 4 (Join-Path $stage "$app-signed.apk")
     if ($LASTEXITCODE -ne 0) { throw 'Signed zipalign verification failed' }
-    Copy-Item -LiteralPath (Join-Path $stage "$app-signed.apk") -Destination (Join-Path $UnsignedDirectory "Family-$app-v2.2.10-Installable.apk")
+    Copy-Item -LiteralPath (Join-Path $stage "$app-signed.apk") -Destination (Join-Path $UnsignedDirectory "Family-$app-v$Version-Installable.apk")
 }
 Get-ChildItem -LiteralPath $UnsignedDirectory -Filter '*Installable.apk' | Get-FileHash -Algorithm SHA256 | Format-Table -AutoSize
 Write-Output 'Signer verified. Device install/update and Samsung endurance still require actual testing.'

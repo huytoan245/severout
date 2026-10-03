@@ -1,6 +1,9 @@
 from pathlib import Path
 import base64,zipfile,io,re,subprocess,sys,shutil
 r=Path(__file__).resolve().parent.parent; workflow=(r/'.github/workflows/build-family-location-v229.yml').read_text(encoding='utf-8')
+if '--baseline-only' in sys.argv or '--v2210-only' in sys.argv:
+ for relative in ['child-app/src/main/java/com/family/child/TokenState.kt','child-app/src/test/java/com/family/child/SurvivalReliabilityTest.kt','parent-app/src/main/java/com/family/parent/ParentWakeBridge.kt','parent-app/src/main/java/com/family/parent/SurvivalHealth.kt']:
+  (r/'appsrc'/relative).unlink(missing_ok=True)
 b64=''.join(p.read_text() for p in sorted((r/'apk-build').glob('part*.txt')))
 zipfile.ZipFile(io.BytesIO(base64.b64decode(b64))).extractall(r/'appsrc')
 for module in ['parent-app','child-app']:
@@ -20,3 +23,4 @@ with Path('appsrc/core/build.gradle.kts').open('a',encoding='utf-8') as f:f.writ
 print('Reconstructed exact v229 workflow baseline')
 
 if '--baseline-only' not in sys.argv: subprocess.run([sys.executable, '-X', 'utf8', 'ci-patches/v2210_reliability_patch.py'],check=True)
+if '--baseline-only' not in sys.argv and '--v2210-only' not in sys.argv: subprocess.run([sys.executable, '-X', 'utf8', 'ci-patches/v2211_survival_patch.py'],check=True)

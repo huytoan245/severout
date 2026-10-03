@@ -1,6 +1,7 @@
 from pathlib import Path
 import xml.etree.ElementTree as ET
 import json
+import sys
 
 root = Path(__file__).resolve().parent.parent
 child = root/'appsrc/child-app/src/main/java/com/family/child'
@@ -9,8 +10,9 @@ def contains(path, values):
     s = path.read_text(encoding='utf-8-sig')
     for value in values: assert value in s, (str(path), value)
     return s
+version, code = ('2.2.10', 32) if '--v2210' in sys.argv else ('2.2.11', 33)
 for module, package in [('parent-app','com.family.parent'),('child-app','com.family.child')]:
-    contains(root/'appsrc'/module/'build.gradle.kts', [f'applicationId = "{package}"','versionCode = 32','versionName = "2.2.10"'])
+    contains(root/'appsrc'/module/'build.gradle.kts', [f'applicationId = "{package}"',f'versionCode = {code}',f'versionName = "{version}"'])
     ET.parse(root/'appsrc'/module/'src/main/AndroidManifest.xml')
 contains(child/'LocationService.kt', ['return START_STICKY','local.commitSample(journal, JournalCheckpoint.encode(engine, sample))','saveRefreshResult(refreshFor, payload)','lastCloudHeartbeatSuccessAt','processExitImportance','pendingJourneyCount','LocationPolicy.problem','running = false'])
 s = (child/'LocationService.kt').read_text(encoding='utf-8')
@@ -37,3 +39,18 @@ contains(root/'firebase-wake/functions/index.js', ['devices/child-01','asia-sout
 contains(root/'firebase-wake/functions/wake-handler.js', ['runTransaction','wakeLeaseOwner','tokenOf(current) === claim.token','ttl: remaining','WAKE_TTL_MS = 15 * 60 * 1000'])
 json.loads((root/'firebase-wake/functions/package-lock.json').read_text(encoding='utf-8'))
 print('Static wiring/product preservation checks passed (not a device/production test)')
+if code == 33:
+    contains(child/'LocationService.kt', ['generation != listenerGeneration','generation != routeGeneration','lastFreshFixAttemptElapsed','"fcmOriginalPriority"','"unusedAppRestricted"'])
+    assert s.index('try { startAsForeground(); running = true }') < s.index('state.restore(engine)')
+    contains(child/'TokenState.kt', ['fcm_token_generation_v2211','expected != null','current(context) != snapshot'])
+    contains(child/'WakeTokenSyncWorker.kt', ['runTransaction','currentDocument.updateTime','fcmTokenOwnerUid','https_readback_verified'])
+    contains(parent/'ParentWakeBridge.kt', ['operation.result.get()','WAKE_WORKER_URL','identity_changed','currentDocument.updateTime','refreshRequestedBy'])
+    contains(parent/'MainActivity.kt', ['SurvivalHealth.fields','Firebase UID Máy Cha','Wake backend đã nhận yêu cầu','ParentWakeBridge.prepareCommand'])
+    contains(root/'cloudflare-wake/src/worker.js', ['verifier.verify','body_too_large','child-01'])
+    contains(root/'cloudflare-wake/src/coordinator.js', ['storage.transaction','tx.setAlarm','attempts < 8','rate_limited','sentFingerprint'])
+    conf=json.loads((root/'cloudflare-wake/wrangler.jsonc').read_text(encoding='utf-8'))
+    assert conf['migrations'][0]['new_sqlite_classes']==['WakeCoordinator']
+    for path in list((root/'appsrc').rglob('*.kt'))+[root/'cloudflare-wake/wrangler.jsonc']:
+        content=path.read_text(encoding='utf-8')
+        assert '-----BEGIN PRIVATE KEY-----' not in content
+    print('v2211 survival/secret boundary static checks passed; production NOT VERIFIED')

@@ -26,7 +26,7 @@ jobs:
         with:
           gradle-version: '9.5.0'
       - name: Reconstruct audited baseline and append v2210
-        run: python3 -X utf8 scripts/reconstruct.py
+        run: python3 -X utf8 scripts/reconstruct.py --v2210-only
       - name: Backend regression
         run: |
           npm ci --prefix firebase-wake/functions --ignore-scripts
@@ -34,7 +34,7 @@ jobs:
           node --test firebase-wake/functions/wake-handler.test.js
           node -e 'require("./firebase-wake/functions/index.js")'
       - name: Static product and recovery validation
-        run: python3 -X utf8 scripts/validate.py
+        run: python3 -X utf8 scripts/validate.py --v2210
       - name: Core, atomic journal, Android build and lint
         working-directory: appsrc
         run: gradle :core:coreSelfCheck :core:scenarioCheck :child-app:testDebugUnitTest :parent-app:assembleRelease :child-app:assembleRelease :parent-app:lintRelease :child-app:lintRelease --console=plain --stacktrace

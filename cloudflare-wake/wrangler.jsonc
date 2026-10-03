@@ -1,0 +1,10 @@
+{
+  "name": "family-location-wake",
+  "main": "src/worker.js",
+  "compatibility_date": "2026-10-03",
+  "workers_dev": true,
+  "durable_objects": { "bindings": [{ "name": "WAKE_STATE", "class_name": "WakeCoordinator" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["WakeCoordinator"] }],
+  "vars": { "FIREBASE_PROJECT_ID": "family-location-884e5" },
+  "observability": { "enabled": false }
+}

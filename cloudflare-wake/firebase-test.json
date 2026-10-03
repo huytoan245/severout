@@ -1,0 +1,4 @@
+{
+  "firestore": { "rules": ".wrangler/test-fixture.rules" },
+  "emulators": { "firestore": { "host": "127.0.0.1", "port": 8086 }, "ui": { "enabled": false }, "singleProjectMode": true }
+}

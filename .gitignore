@@ -6,3 +6,10 @@ __pycache__/
 *.keystore
 firebase-debug.log
 firebase-wake/functions/node_modules/
+cloudflare-wake/node_modules/
+cloudflare-wake/dist/
+cloudflare-wake/.wrangler/
+.dev.vars*
+*service-account*.json
+*secrets*.json
+*-debug.log
