@@ -49,7 +49,7 @@ com.family.parent/com.family.child, family-location-884e5, child-01, one Parent+
 |APK integrity/zipalign|PASS unsigned ZIP integrity and16KiB zipalign on actual build artifacts; same bytes copied to candidate|
 |New signature gate|PASS script parse/refuses missing pinned signer; actual apksigner verify on unsigned APK fails Missing META-INF as expected. **Signed signature verification NOT VERIFIED**|
 
-CI status/exact commit, APK+ZIP SHA256, local logs/XML/lint reports and input-byte equality are recorded in delivery VALIDATION-EVIDENCE.json. Negative permission-denial emulator logs are expected assertions, not hidden test failures. Initial compile/test compatibility errors were corrected; PASS above refers to final successful runs.
+CI status/exact commit, APK+ZIP SHA256, local logs/XML/lint reports and input-byte equality are recorded in delivery VALIDATION-EVIDENCE.json. Negative permission-denial emulator logs are expected assertions, not hidden test failures. Initial compile/test compatibility errors were corrected. The first CI run also exposed a stale version2.2.11 expectation/bundle in the runtime smoke test; it now always builds fresh before asserting2.3.0. PASS above refers to the corrected successful runs.
 
 ## Chưa kiểm tra
 
