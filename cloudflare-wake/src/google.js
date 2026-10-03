@@ -31,7 +31,7 @@ export class FirebaseVerifier {
       const h = JSON.parse(new TextDecoder().decode(unb64(parts[0])));
       const p = JSON.parse(new TextDecoder().decode(unb64(parts[1])));
       const sec = now / 1000;
-      if (h.alg !== 'RS256' || typeof h.kid !== 'string' || h.crit || p.aud !== PROJECT || p.iss !== `https://securetoken.google.com/${PROJECT}` || p.sub !== uid || !p.sub || p.sub.length > 128 || !Number.isFinite(p.exp) || p.exp <= sec || !Number.isFinite(p.iat) || p.iat > sec + 30 || !Number.isFinite(p.auth_time) || p.auth_time > sec + 30 || p.auth_time < 0 || p.iat < 0 || (p.nbf != null && p.nbf > sec + 30)) throw new Error();
+      if (h.alg !== 'RS256' || typeof h.kid !== 'string' || h.crit || p.aud !== PROJECT || p.iss !== `https://securetoken.google.com/${PROJECT}` || p.sub !== uid || !p.sub || p.sub.length > 128 || !Number.isFinite(p.exp) || p.exp <= sec || !Number.isFinite(p.iat) || p.iat > sec + 30 || !Number.isFinite(p.auth_time) || p.auth_time > sec + 30 || p.auth_time < 0 || p.iat < 0 || p.exp <= p.iat || p.exp - p.iat > 3660 || p.auth_time > p.iat + 30 || (p.nbf != null && p.nbf > sec + 30)) throw new Error();
       if (!this.keys || now >= this.until) await this.load(now);
       let jwk = this.keys.find(k => k.kid === h.kid && k.kty === 'RSA');
       if (!jwk && now - this.lastFetch >= 60000) { await this.load(now); jwk = this.keys.find(k => k.kid === h.kid && k.kty === 'RSA'); }
@@ -88,7 +88,7 @@ export class GoogleApi {
     return true;
   }
   async send(token, id, ttlMs) {
-    const r = await this.call(`https://fcm.googleapis.com/v1/projects/${PROJECT}/messages:send`, { method: 'POST', body: JSON.stringify({ message: { token, android: { priority: 'HIGH', ttl: `${Math.max(1, Math.floor(ttlMs / 1000))}s`, collapse_key: 'family-location-refresh' }, data: { type: 'location_refresh', requestId: String(id) } } }) });
+    const r = await this.call(`https://fcm.googleapis.com/v1/projects/${PROJECT}/messages:send`, { method: 'POST', body: JSON.stringify({ message: { token, android: { priority: 'HIGH', ttl: `${Math.max(1, Math.floor(ttlMs / 1000))}s`, collapse_key: 'family-location-refresh' }, data: { type: 'location_refresh', deviceId: 'child-01', requestId: String(id), requestedAt: String(id), expiresAt: String(id + 15 * 60000) } } }) });
     if (!r.ok) {
       let d; try { d = await r.json(); } catch { d = {}; }
       const invalid = d.error?.details?.some(x => x['@type'] === 'type.googleapis.com/google.firebase.fcm.v1.FcmError' && x.errorCode === 'UNREGISTERED');

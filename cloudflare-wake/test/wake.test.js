@@ -108,7 +108,7 @@ async function jwt(overrides = {}, header = {}) {
 function verifier() { return new FirebaseVerifier(async () => Response.json({ keys: [jwk] }, { headers: { 'cache-control': 'max-age=3600' } })); }
 test('cryptographically valid Firebase token and exact Parent UID accepted', async () => { assert.equal(await verifier().verify(await jwt(), 'parent', NOW), 'parent'); });
 test('forged signature, wrong UID/project/issuer/expiry/alg/key rejected', async () => {
-  const values = [await jwt({ sub: 'child' }), await jwt({ aud: 'other' }), await jwt({ iss: 'https://evil' }), await jwt({ exp: NOW / 1000 }), await jwt({ iat: NOW / 1000 + 60 }), await jwt({ auth_time: NOW / 1000 + 60 }), await jwt({}, { alg: 'HS256' }), await jwt({}, { kid: 'unknown' })];
+  const values = [await jwt({ sub: 'child' }), await jwt({ aud: 'other' }), await jwt({ iss: 'https://evil' }), await jwt({ exp: NOW / 1000 }), await jwt({ iat: NOW / 1000 + 60 }), await jwt({ auth_time: NOW / 1000 + 60 }), await jwt({ exp: NOW / 1000 - 100 }), await jwt({ exp: NOW / 1000 + 7200 }), await jwt({ auth_time: NOW / 1000 + 25, iat: NOW / 1000 - 100 }), await jwt({}, { alg: 'HS256' }), await jwt({}, { kid: 'unknown' })];
   const valid = await jwt(); values.push(valid.slice(0, -8) + 'AAAAAAA');
   for (const token of values) await assert.rejects(() => verifier().verify(token, 'parent', NOW), e => e.status === 401);
 });
@@ -119,7 +119,7 @@ test('public keys cached; keys outage is a retryable error, not valid auth', asy
 });
 const awaitToken = await jwt();
 test('public health reveals no secrets; wake fails closed without config', async () => {
-  const r = await worker.fetch(new Request('https://x/health'), {}); assert.deepEqual(await r.json(), { service: 'family-location-wake', version: '2.2.11', configured: false });
+  const r = await worker.fetch(new Request('https://x/health'), {}); assert.deepEqual(await r.json(), { service: 'family-location-wake', version: '2.3.0', configured: false });
   const denied = await worker.fetch(new Request('https://x/v1/wake', { method: 'POST', body: '{}' }), {}); assert.equal(denied.status, 503);
 });
 test('configured endpoint rejects missing auth, arbitrary token and oversize body', async () => {
@@ -137,5 +137,5 @@ test('Firestore diagnostic uses updateTime precondition and preserves newer comm
 });
 test('FCM HTTP v1 uses HIGH, correct project, server token and remaining TTL', async () => {
   const api = new GoogleApi({}); let payload; api.call = async (url, opts) => { assert.equal(url, 'https://fcm.googleapis.com/v1/projects/family-location-884e5/messages:send'); payload = JSON.parse(opts.body); return Response.json({ name: 'message' }); };
-  assert.equal(await api.send('server-token', NOW, 90000), 'message'); assert.equal(payload.message.token, 'server-token'); assert.equal(payload.message.android.priority, 'HIGH'); assert.equal(payload.message.android.ttl, '90s');
+  assert.equal(await api.send('server-token', NOW, 90000), 'message'); assert.equal(payload.message.token, 'server-token'); assert.equal(payload.message.android.priority, 'HIGH'); assert.equal(payload.message.android.ttl, '90s'); assert.equal(payload.message.data.deviceId,'child-01'); assert.equal(payload.message.data.requestedAt,String(NOW)); assert.equal(payload.message.data.expiresAt,String(NOW+TTL));
 });

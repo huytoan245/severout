@@ -33,5 +33,13 @@ try {
   await deny(setDoc(doc(parent, path + '/events/id2'), { type: 'location_sample', id: 'spoof', time: now }));
   await deny(setDoc(doc(child, 'devices/child-02'), { heartbeatAt: now }));
   await deny(deleteDoc(doc(parent, path))); await deny(deleteDoc(doc(child, path + '/events/id')));
+  await deny(setDoc(doc(child,path),{ refreshReceivedFor: now-1 },{merge:true}));
+  await deny(setDoc(doc(child,path),{ refreshResult:'locating' },{merge:true}));
+  await pass(setDoc(doc(child,path),{ locationTime:now },{merge:true}));
+  await deny(setDoc(doc(child,path),{ locationTime:now-1 },{merge:true}));
+  await deny(setDoc(doc(child,path),{ fcmToken:'same-revision-other-token',fcmTokenGeneration:2 },{merge:true}));
+  await pass(setDoc(doc(child,path),{ fcmToken:'clean-install-token',fcmTokenGeneration:3000,fcmTokenOwnerUid:'test-child' },{merge:true}));
+  await pass(setDoc(doc(child,path+'/events/id'),{type:'location_sample',id:'sample-id',time:now,lat:20.0,lon:105.0}));
+  await deny(setDoc(doc(child,path+'/events/id'),{type:'location_sample',id:'sample-id',time:now-1,lat:20.0,lon:105.0}));
   console.log(`PASS: ${count} actual Firestore emulator security-rule assertions. Fixture UIDs/project only; no production writes.`);
 } finally { await env.cleanup(); }

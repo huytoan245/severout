@@ -1,9 +1,16 @@
-appsrc/
+appsrc/**/build/
+appsrc/.gradle/
+appsrc/.kotlin/
+appsrc/local.properties
 out/
 .gradle/
 __pycache__/
 *.jks
 *.keystore
+*.p12
+*.pfx
+*.password
+signing-input*
 firebase-debug.log
 firebase-wake/functions/node_modules/
 cloudflare-wake/node_modules/
@@ -13,3 +20,7 @@ cloudflare-wake/.wrangler/
 *service-account*.json
 *secrets*.json
 *-debug.log
+*.pem
+*.key
+.env*
+*firebase-adminsdk*.json

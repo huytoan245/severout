@@ -1,0 +1,9 @@
+.gradle/
+.idea/
+**/build/
+local.properties
+# Public Firebase Android client config is required for reproducible builds.
+# Server service-account keys remain excluded by the repository-wide ignore.
+secrets.properties
+*.jks
+*.keystore
