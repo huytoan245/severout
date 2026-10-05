@@ -45,6 +45,9 @@ jobs:
         run: python3 -X utf8 scripts/reconstruct.py
       - name: Static product/secret boundary and recovery validation
         run: python3 -X utf8 scripts/validate.py
+      - name: Existing signer recovery and paired signing gate regression (no private key)
+        shell: pwsh
+        run: ./scripts/test-release-signing.ps1 -JavaHome $env:JAVA_HOME
       - name: Core, journal/token, Android build and full lint
         working-directory: appsrc
         run: gradle :core:coreSelfCheck :core:scenarioCheck :child-app:testDebugUnitTest :parent-app:assembleRelease :child-app:assembleRelease :parent-app:lintRelease :child-app:lintRelease --console=plain --stacktrace
