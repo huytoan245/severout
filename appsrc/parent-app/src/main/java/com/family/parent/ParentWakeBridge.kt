@@ -1,6 +1,8 @@
 package com.family.parent
 
 import android.content.Context
+import com.family.enrollment.EnrollmentClient
+import com.family.enrollment.EnrollmentFailure
 import android.os.Handler
 import android.os.Looper
 import androidx.work.*
@@ -25,39 +27,23 @@ object ParentWakeBridge {
     fun endpoint(): String? = BuildConfig.WAKE_WORKER_URL.takeIf { value ->
         try { val url = URL(value); url.protocol == "https" && url.host.isNotBlank() && url.userInfo == null && url.query == null && url.ref == null && (url.path.isBlank() || url.path == "/") } catch (_: Exception) { false }
     }?.trimEnd('/')
-    fun dispatch(request: Long, callback: (Result) -> Unit) {
+    fun dispatch(context: Context, request: Long, callback: (Result) -> Unit) {
         val uid = FirebaseAuth.getInstance().currentUser?.uid
         if (uid == null) { callback(Result("no_auth", true)); return }
-        try { executor.execute { val result = send(request, uid); main.post { callback(result) } } }
+        try { executor.execute { val result = send(context.applicationContext, request, uid); main.post { callback(result) } } }
         catch (_: RejectedExecutionException) { callback(Result("transport_busy", true)) }
     }
-    fun send(request: Long, uid: String): Result {
+    fun send(context: Context, request: Long, uid: String): Result {
         val base = endpoint() ?: return Result("not_configured", false)
         if (System.currentTimeMillis() >= request + 15 * 60_000L) return Result("expired", false)
-        try {
-            val user = FirebaseAuth.getInstance().currentUser ?: return Result("no_auth", true)
-            if (user.uid != uid) return Result("identity_changed", false)
-            repeat(2) { index ->
-                val token = Tasks.await(user.getIdToken(index > 0), 15, TimeUnit.SECONDS).token ?: return Result("no_id_token", true)
-                if (FirebaseAuth.getInstance().currentUser?.uid != uid) return Result("identity_changed", false)
-                val c = (URL("$base/v1/wake").openConnection() as HttpURLConnection).apply {
-                    requestMethod = "POST"; connectTimeout = 8_000; readTimeout = 8_000; instanceFollowRedirects = false
-                    doOutput = true; useCaches = false; setRequestProperty("Connection", "close")
-                    setRequestProperty("Content-Type", "application/json"); setRequestProperty("Authorization", "Bearer $token")
-                }
-                try {
-                    val body = JSONObject().put("deviceId", "child-01").put("requestId", request.toString()).put("requestedAt", request)
-                    c.outputStream.use { it.write(body.toString().toByteArray(Charsets.UTF_8)) }
-                    val code = c.responseCode
-                    if (code == 401 && index == 0) return@repeat
-                    val stream = if (code in 200..299) c.inputStream else c.errorStream
-                    val data = stream?.bufferedReader()?.use { it.readText().take(1024) }?.let { JSONObject(it) } ?: JSONObject()
-                    if (code in 200..299 && data.optString("requestId") == request.toString()) return Result(data.optString("status", "accepted"), false, true)
-                    return Result(data.optString("error", "http_$code"), code >= 500 || code == 429)
-                } finally { c.disconnect() }
-            }
-            return Result("unauthorized", false)
-        } catch (_: Exception) { return Result("network_error", true) }
+        return try {
+            if (EnrollmentClient.ensureRegistered(context, base, "parent") != uid) return Result("identity_changed", false)
+            val data = EnrollmentClient.signed(context, base, "parent", "wake", JSONObject()
+                .put("deviceId", "child-01").put("requestId", request.toString()).put("requestedAt", request))
+            if (data.optString("requestId") == request.toString()) Result(data.optString("status", "accepted"), false, true)
+            else Result("invalid_response", true)
+        } catch (e: EnrollmentFailure) { Result(e.code, e.retryable) }
+        catch (_: Exception) { Result("network_error", true) }
     }
     @Synchronized fun newRequest(context: Context): Long {
         val prefs = context.getSharedPreferences("wake_diag",Context.MODE_PRIVATE)
@@ -102,9 +88,10 @@ class ParentWakeWorker(context: Context, params: WorkerParameters) : Worker(cont
         if (id <= 0L || System.currentTimeMillis() >= id + 15 * 60_000L || runAttemptCount >= 8) return Result.failure()
         if (FirebaseAuth.getInstance().currentUser?.uid != uid) return Result.failure()
         try {
+            EnrollmentClient.ensureRegistered(applicationContext, BuildConfig.WAKE_WORKER_URL, "parent")
             val written = try { Tasks.await(ParentWakeBridge.durableCommand(id, uid), 20, TimeUnit.SECONDS) } catch (_: Exception) { ParentCommandRest.write(id, uid) }
             if (!written || isStopped) return if (isStopped) Result.success() else Result.retry()
-            val sent = ParentWakeBridge.send(id, uid)
+            val sent = ParentWakeBridge.send(applicationContext, id, uid)
             applicationContext.getSharedPreferences("wake_diag", Context.MODE_PRIVATE).edit().putLong("request", id).putString("result", sent.status).apply()
             return if (sent.accepted) Result.success() else if (sent.retry) Result.retry() else Result.failure()
         } catch (_: Exception) { return Result.retry() }

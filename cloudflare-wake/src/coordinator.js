@@ -11,7 +11,9 @@ export class WakeCoordinator {
   async fetch(request) {
     return this.locked(async () => {
       try {
-        const b = await request.json(); const id = validateRequest(b, this.clock());
+        const b = await request.json(); const id = validateRequest(b.command, this.clock());
+        const family = await this.api.readFamily();
+        if (!family.parentUid || !family.childUid || b.binding?.parentUid !== family.parentUid || b.binding?.epoch !== family.epoch) throw new ApiError('family_changed', 403);
         let state;
         await this.ctx.storage.transaction(async tx => {
           const rate = await tx.get('rate') || { from: this.clock(), count: 0 };
@@ -21,7 +23,7 @@ export class WakeCoordinator {
           state = await tx.get('request');
           if (state && state.id > id) throw new ApiError('superseded_request', 409);
           if (!state || state.id < id) {
-            state = { id, expires: id + TTL, status: 'accepted', attempts: 0, sentFingerprint: '', nextAt: this.clock() };
+            state = { id, parentUid: family.parentUid, epoch: family.epoch, expires: id + TTL, status: 'accepted', attempts: 0, sentFingerprint: '', nextAt: this.clock() };
             await tx.put('request', state); await tx.setAlarm(this.clock() + 1000);
           }
         });
@@ -46,11 +48,13 @@ export class WakeCoordinator {
     s.attempts++; s.nextAt = now + 30000;
     await this.ctx.storage.transaction(async tx => { await tx.put('request', s); await tx.setAlarm(Math.min(s.nextAt, s.expires)); });
     try {
+      const family = await this.api.readFamily();
+      if (!family.parentUid || !family.childUid || family.parentUid !== s.parentUid || family.epoch !== s.epoch) throw new ApiError('family_changed', 403);
       const d = await this.api.readDevice();
-      if (d.refreshRequestedAt !== s.id || d.refreshRequestedBy !== this.env.PARENT_UID || d.refreshExpiresAt !== s.expires) throw new ApiError('command_mismatch', 409);
+      if (d.refreshRequestedAt !== s.id || d.refreshRequestedBy !== family.parentUid || d.refreshExpiresAt !== s.expires) throw new ApiError('command_mismatch', 409);
       if (d.refreshCompletedFor === s.id || d.refreshFailedFor === s.id) { s.status = 'completed'; await this.finish(s); return; }
       if (d.refreshReceivedFor === s.id) { s.status = 'received'; await this.finish(s); return; }
-      if (d.fcmTokenOwnerUid !== this.env.CHILD_UID) throw new ApiError('child_identity_unconfirmed', 503, true);
+      if (d.fcmTokenOwnerUid !== family.childUid) throw new ApiError('child_identity_unconfirmed', 503, true);
       await this.api.patchIfCurrent(s.id, { wakeBackendFor: s.id, wakeBackendAt: now, wakeBackendResult: 'accepted' });
       if (!d.fcmToken || typeof d.fcmToken !== 'string') throw new ApiError('missing_fcm_token', 503, true);
       const hash = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(d.fcmToken)));
@@ -60,7 +64,9 @@ export class WakeCoordinator {
         // Re-read immediately before send; never send a stale/newer command or
         // a token superseded during the preceding diagnostic write.
         const current = await this.api.readDevice();
-        if (current.refreshRequestedAt !== s.id || current.refreshRequestedBy !== this.env.PARENT_UID || current.fcmToken !== d.fcmToken || current.fcmTokenOwnerUid !== this.env.CHILD_UID) throw new ApiError('state_changed', 503, true);
+        const currentFamily = await this.api.readFamily();
+        if (currentFamily.updateTime !== family.updateTime || currentFamily.epoch !== s.epoch || currentFamily.parentUid !== s.parentUid || currentFamily.childUid !== family.childUid) throw new ApiError('family_changed', 403);
+        if (current.refreshRequestedAt !== s.id || current.refreshRequestedBy !== family.parentUid || current.fcmToken !== d.fcmToken || current.fcmTokenOwnerUid !== family.childUid) throw new ApiError('state_changed', 503, true);
         if (current.refreshCompletedFor === s.id || current.refreshFailedFor === s.id) { s.status = 'completed'; await this.finish(s); return; }
         if (this.clock() >= s.expires) throw new ApiError('expired_request', 410);
         let messageId;

@@ -3,8 +3,8 @@
   "main": "src/worker.js",
   "compatibility_date": "2026-10-03",
   "workers_dev": true,
-  "durable_objects": { "bindings": [{ "name": "WAKE_STATE", "class_name": "WakeCoordinator" }] },
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["WakeCoordinator"] }],
-  "vars": { "FIREBASE_PROJECT_ID": "family-location-884e5" },
+  "durable_objects": { "bindings": [{ "name": "WAKE_STATE", "class_name": "WakeCoordinator" }, { "name": "FAMILY_REGISTRY", "class_name": "FamilyRegistry" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["WakeCoordinator"] }, { "tag": "v2", "new_sqlite_classes": ["FamilyRegistry"] }],
+  "vars": { "FIREBASE_PROJECT_ID": "family-location-884e5", "ENROLLMENT_ENABLED": "true" },
   "observability": { "enabled": false }
 }

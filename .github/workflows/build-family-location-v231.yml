@@ -1,0 +1,79 @@
+name: Build Family Location v2.3.1 Zero Setup Pairing
+on:
+  pull_request:
+    branches: [v230-clean-reliable-baseline]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      WRANGLER_SEND_METRICS: 'false'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Worker auth/retry/runtime and Firestore rules regression
+        working-directory: cloudflare-wake
+        run: |
+          npm ci --ignore-scripts
+          npm test
+          npm run check
+          npm run dry-run
+          npm run test:runtime
+          node render-rules.mjs --output .wrangler/test-fixture.rules
+          npx --yes firebase-tools@15.32.1 emulators:exec --only firestore --project demo-family-location-wake --config firebase-test.json 'node test/firestore-rules.mjs'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: 'platform-tools'
+      - run: sdkmanager "platforms;android-36" "build-tools;36.0.0" "platform-tools"
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.5.0'
+      - name: Validate tracked canonical source
+        run: python3 -X utf8 scripts/reconstruct.py
+      - name: Static product/secret boundary and recovery validation
+        run: python3 -X utf8 scripts/validate.py
+      - name: Existing signer recovery and paired signing gate regression (no private key)
+        shell: pwsh
+        run: ./scripts/test-release-signing.ps1 -JavaHome $env:JAVA_HOME
+      - name: Core, journal/token, Android build and full lint
+        working-directory: appsrc
+        run: gradle -I ../scripts/capture-build-tools.gradle captureSigningBuildTools -PfamilySigningMetadata="$GITHUB_WORKSPACE/out/ANDROID-BUILD-TOOLS.json" :core:coreSelfCheck :core:scenarioCheck :enrollment:testDebugUnitTest :child-app:testDebugUnitTest :parent-app:assembleRelease :child-app:assembleRelease :enrollment:lintRelease :parent-app:lintRelease :child-app:lintRelease --console=plain --stacktrace
+      - name: Verify APK alignment and collect unsigned candidate (existing signer; local secure password required)
+        run: |
+          mkdir -p out/cloudflare-wake
+          cp appsrc/parent-app/build/outputs/apk/release/parent-app-release-unsigned.apk out/Family-Parent-v2.3.1-unsigned.apk
+          cp appsrc/child-app/build/outputs/apk/release/child-app-release-unsigned.apk out/Family-Child-v2.3.1-unsigned.apk
+          "$ANDROID_HOME/build-tools/36.0.0/zipalign" -c -P 16 4 out/Family-Parent-v2.3.1-unsigned.apk
+          "$ANDROID_HOME/build-tools/36.0.0/zipalign" -c -P 16 4 out/Family-Child-v2.3.1-unsigned.apk
+          cp -r cloudflare-wake/src cloudflare-wake/test out/cloudflare-wake/
+          cp cloudflare-wake/package*.json cloudflare-wake/wrangler.jsonc cloudflare-wake/firebase-test.json cloudflare-wake/render-rules.mjs out/cloudflare-wake/
+          cp -r docs scripts out/
+          git archive --format=zip --output=out/Family-Location-v2.3.1-Source.zip HEAD
+          sha256sum out/*.apk out/*Source.zip > out/SHA256SUMS.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: family-location-v2.3.1-unsigned-candidate
+          path: out/
+          retention-days: 14
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: family-location-v2.3.1-test-reports
+          path: |
+            appsrc/enrollment/build/reports/tests/
+            appsrc/child-app/build/reports/tests/
+            appsrc/child-app/build/reports/lint-results-release.*
+            appsrc/parent-app/build/reports/lint-results-release.*

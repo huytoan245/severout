@@ -26,6 +26,7 @@ import com.google.android.gms.location.*
 import com.google.android.gms.tasks.CancellationTokenSource
 import java.util.concurrent.RejectedExecutionException
 import com.google.firebase.auth.FirebaseAuth
+import com.family.enrollment.EnrollmentClient
 import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.ListenerRegistration
@@ -137,7 +138,7 @@ class LocationService : Service() {
         }
         publishLocalStatus("network_recovery")
         cloud.enableNetwork()
-        if (FirebaseAuth.getInstance().currentUser != null) {
+        if (cloudIdentityReady()) {
             listenCommands()
             pollRestCommand()
             publishHeartbeat()
@@ -236,6 +237,8 @@ class LocationService : Service() {
         handler.postDelayed(healthCheck, 10_000L)
     }
 
+    private fun cloudIdentityReady() = EnrollmentClient.registered(this, "child")
+
     private fun ensureAuthenticated() {
         if (destroyed) return
         val auth = FirebaseAuth.getInstance()
@@ -256,6 +259,7 @@ class LocationService : Service() {
         if (destroyed) return
         publishLocalStatus("auth_ok")
         WakeTokenSyncWorker.schedule(this)
+        if (!cloudIdentityReady()) { publishLocalStatus("enrollment_pending"); return }
         resumeDurableRefresh()
         consumePendingFcmRefresh()
         cloud.enableNetwork()
@@ -299,7 +303,7 @@ class LocationService : Service() {
                 .putLong(KEY_PENDING_FCM_REFRESH_ID, pendingFcmRefreshRequestId)
                 .putLong("fcm_service_wake_at", System.currentTimeMillis())
                 .apply()
-            if (FirebaseAuth.getInstance().currentUser != null) consumePendingFcmRefresh()
+            if (cloudIdentityReady()) consumePendingFcmRefresh()
         }
         if (intent?.action == ACTION_TRACKING_NOTIFICATION_DISMISSED) {
             getSharedPreferences("tracking_diag", MODE_PRIVATE).edit()
@@ -397,7 +401,7 @@ class LocationService : Service() {
     private fun evaluateTrackingHealth() {
         if (destroyed) return
         ensureAuthenticated()
-        if (FirebaseAuth.getInstance().currentUser != null && commandListener == null && SystemClock.elapsedRealtime() >= listenerRetryAt) listenCommands()
+        if (cloudIdentityReady() && commandListener == null && SystemClock.elapsedRealtime() >= listenerRetryAt) listenCommands()
         val fine = hasFineLocation()
         val locationOn = isLocationEnabled()
         val elapsed = SystemClock.elapsedRealtime()
@@ -472,7 +476,7 @@ class LocationService : Service() {
     }
 
     private fun pollRestCommand() {
-        if (FirebaseAuth.getInstance().currentUser == null) return
+        if (!cloudIdentityReady()) return
         ChildHttpsBridge.readDevice { state, error ->
             if (state != null) {
                 publishLocalStatus("https_fallback_ok")
@@ -529,7 +533,7 @@ class LocationService : Service() {
 
     private fun retryRefreshResult() = journal { retryRefreshInJournal() }
     private fun retryRefreshInJournal() {
-        if (destroyed || FirebaseAuth.getInstance().currentUser == null) return
+        if (destroyed || !cloudIdentityReady()) return
         val envelope = JSONObject(local.meta("refresh_result") ?: "{}")
         val request = envelope.optLong("request")
         val prefs = getSharedPreferences("tracking_diag", MODE_PRIVATE)
@@ -567,7 +571,7 @@ class LocationService : Service() {
             "locationReminderAckAt" to now,
             "locationReminderResult" to result
         )
-        if (FirebaseAuth.getInstance().currentUser != null) {
+        if (cloudIdentityReady()) {
             cloud.collection("devices").document(CHILD_DOC).set(payload, SetOptions.merge())
                 .addOnFailureListener { e -> publishLocalStatus("reminder_ack:${e.javaClass.simpleName}") }
             ChildHttpsBridge.patch(payload)
@@ -611,7 +615,7 @@ class LocationService : Service() {
     }
 
     private fun publishRefreshAck(requestId: Long) {
-        if (FirebaseAuth.getInstance().currentUser == null) return
+        if (!cloudIdentityReady()) return
         val now = System.currentTimeMillis()
         val payload = mapOf<String, Any?>(
             "refreshAckFor" to requestId,
@@ -715,7 +719,7 @@ class LocationService : Service() {
             payload["refreshUploadedFor"] = refreshFor; payload["refreshUploadedAt"] = now
             saveRefreshResult(refreshFor, payload)
         }
-        if (refreshFor == null && FirebaseAuth.getInstance().currentUser != null) {
+        if (refreshFor == null && cloudIdentityReady()) {
             ChildDeviceWriter.write(payload) { ok ->
                 if (ok && !destroyed) { failoverManager.reportServerSuccess(); publishLocalStatus("location_sent") }
             }
@@ -757,7 +761,7 @@ class LocationService : Service() {
     }
 
     private fun flushPending() {
-        if (FirebaseAuth.getInstance().currentUser == null || !flushing.compareAndSet(false, true)) return
+        if (!cloudIdentityReady() || !flushing.compareAndSet(false, true)) return
         background {
             pendingEventCount = try { local.batch(PENDING_REPORT_LIMIT).size } catch (_: Exception) { pendingEventCount }
             if (pendingEventCount > 0 && !syncSessionActive) {
@@ -901,7 +905,7 @@ class LocationService : Service() {
         lastCloudHeartbeatAttemptAt = now
         maintainTrackingNotification(now)
         updateNetworkHistory(now)
-        if (FirebaseAuth.getInstance().currentUser == null) return
+        if (!cloudIdentityReady()) return
         val service = if (hasFineLocation() && isLocationEnabled()) "tracking" else "attention_needed"
         val data = mutableMapOf<String, Any?>(
             "heartbeatAt" to now,
@@ -933,7 +937,7 @@ class LocationService : Service() {
     }
 
     private fun publishCloudStatus(status: String, error: String?) {
-        if (FirebaseAuth.getInstance().currentUser == null) return
+        if (!cloudIdentityReady()) return
         val now = System.currentTimeMillis()
         val data = mutableMapOf<String, Any?>(
             "status" to status,
@@ -1095,7 +1099,7 @@ class LocationService : Service() {
                 if (destroyed || generation != routeGeneration) return@addOnCompleteListener
                 cloud.enableNetwork().addOnCompleteListener {
                     if (destroyed || generation != routeGeneration) return@addOnCompleteListener
-                    if (FirebaseAuth.getInstance().currentUser != null) {
+                    if (cloudIdentityReady()) {
                         listenCommands()
                         pollRestCommand()
                         publishHeartbeat()
@@ -1110,7 +1114,7 @@ class LocationService : Service() {
     }
 
     private fun publishFailoverState(reason: String) {
-        if (FirebaseAuth.getInstance().currentUser == null) return
+        if (!cloudIdentityReady()) return
         val s = failoverManager.snapshot()
         val payload = mapOf<String, Any?>(
             "routeMode" to s.routeMode,
@@ -1175,7 +1179,7 @@ class LocationService : Service() {
             "lastOfflineEndAt" to prefs.getLong(KEY_LAST_OFFLINE_END, 0L),
             "lastOfflineDurationMs" to prefs.getLong(KEY_LAST_OFFLINE_DURATION, 0L)
         )
-        if (FirebaseAuth.getInstance().currentUser != null) {
+        if (cloudIdentityReady()) {
             cloud.collection("devices").document(CHILD_DOC).set(payload, SetOptions.merge())
                 .addOnFailureListener { e -> publishLocalStatus("sync_state:${e.javaClass.simpleName}") }
             ChildHttpsBridge.patch(payload)

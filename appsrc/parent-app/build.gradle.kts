@@ -18,14 +18,15 @@ android {
         minSdk = 26
         targetSdk = 36
         buildConfigField("String", "WAKE_WORKER_URL", "\"$wakeWorkerUrl\"")
-        versionCode = 34
-        versionName = "2.3.0"
+        versionCode = 35
+        versionName = "2.3.1"
     }
     buildFeatures { compose = true; buildConfig = true }
     compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
 }
 dependencies {
     implementation(project(":core"))
+    implementation(project(":enrollment"))
     implementation(platform("androidx.compose:compose-bom:2026.06.00"))
     implementation("androidx.activity:activity-compose:1.13.0")
     implementation("androidx.compose.material3:material3")

@@ -1,17 +1,25 @@
+import java.net.URI
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.plugin.compose")
     id("com.google.gms.google-services")
 }
+val wakeWorkerUrl = providers.gradleProperty("wakeWorkerUrl").orElse(providers.environmentVariable("FAMILY_LOCATION_WAKE_WORKER_URL")).orElse("https://family-location-wake.huytoan0979928450.workers.dev").get()
+val workerOrigin = URI(wakeWorkerUrl)
+require(workerOrigin.scheme == "https" && !workerOrigin.host.isNullOrBlank() && workerOrigin.rawUserInfo == null &&
+    workerOrigin.rawQuery == null && workerOrigin.rawFragment == null && (workerOrigin.path.isNullOrEmpty() || workerOrigin.path == "/")) { "Worker URL must be a public HTTPS origin without endpoint/path" }
+
 android {
     namespace = "com.family.child"
     compileSdk = 36
-    defaultConfig { applicationId = "com.family.child"; minSdk = 26; targetSdk = 36; versionCode = 34; versionName = "2.3.0" }
+    defaultConfig { applicationId = "com.family.child"; minSdk = 26; targetSdk = 36; versionCode = 35; versionName = "2.3.1"; buildConfigField("String", "WAKE_WORKER_URL", "\"$wakeWorkerUrl\"") }
     buildFeatures { compose = true; buildConfig = true }
     compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
 }
 dependencies {
     implementation(project(":core"))
+    implementation(project(":enrollment"))
     implementation(platform("androidx.compose:compose-bom:2026.06.00"))
     implementation("androidx.activity:activity-compose:1.13.0")
     implementation("androidx.compose.material3:material3")

@@ -1,3 +1,7 @@
+> HƯỚNG DẪN LỊCH SỬ v2.2.11/v2.3.0. Không dùng bước lấy UID/secrets UID
+> cho v2.3.1. URL hiện đã xác nhận; thiết kế mới ở [ZERO_SETUP_PAIRING_V231.md](ZERO_SETUP_PAIRING_V231.md).
+> Chưa deploy production v2.3.1; chờ review thiết kế.
+
 # Thiết lập Firebase Spark + Cloudflare Workers Free — từng bước
 
 Ngày 03/10/2026. **Chưa deploy production.** Kiểm tra thật bằng Wrangler 4.147.0 trên máy Windows của phiên Codex này trả về `You are not authenticated`. Không dùng tài khoản preview tạm, không có URL production và chưa xác định UID Máy Cha/Máy Con. Không có private key trong source/APK.

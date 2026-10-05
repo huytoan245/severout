@@ -1,0 +1,9 @@
+Family Location v2.3.0 required the operator to copy anonymous UIDs into Worker secrets and generated Rules after installation. v2.3.1/code35 introduces automatic enrollment for fixed `family-01` / `child-01`, with one server-controlled Parent slot and one Child slot.
+
+Apps authenticate and register in the background using Android Keystore P-256 proof, short-lived server nonces and durable retry. Atomic Firestore CAS enforces first enrollment wins; third identities and replacement keys are rejected. Worker wake/token endpoints use the current role mapping, while dynamic Rules deny client role/token/backend-field writes. Parent observes pairing automatically; Child's locked UI and local GPS journal remain intact.
+
+Full uninstall loses UID/key and requires separately approved operator recovery. The offline recovery planner increments the epoch, retires the lost identity and preserves location/events. First-wins enrollment does not prove the first registrant is the owner: pre-enrollment squatting remains a review requirement. See `docs/ZERO_SETUP_PAIRING_V231.md` for the explicit trust/migration limits.
+
+Validation run locally: 45 Worker/auth/enrollment/recovery tests; actual workerd/SQLite public JWT/enrollment/token/FCM-fixture/restart checks; 51 Firestore emulator Rules/REST assertions; 33 Android unit tests (26 retained + 7 enrollment); core/scenario checks, both release builds and full lint; 69 password-free signing regressions. Detailed evidence is in `docs/VALIDATION_V231.md`.
+
+The v2.3.0 release signer is preserved. v2.3.1 signing awaits local SecureString password entry after the unsigned preflight. Production FCM, two physical phones, APK update/reboot persistence and Samsung endurance are unverified. Draft for review; no production deployment, master merge, release-key regeneration or app install/uninstall.
