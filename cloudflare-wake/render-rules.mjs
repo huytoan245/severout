@@ -20,18 +20,33 @@ service cloud.firestore {
     function childTokenValid() {
       return !request.resource.data.diff(resource.data).affectedKeys().hasAny(['fcmToken','fcmTokenGeneration','fcmTokenOwnerUid']) ||
         (request.resource.data.fcmTokenOwnerUid == request.auth.uid && request.resource.data.fcmToken is string &&
-         request.resource.data.fcmTokenGeneration is int && request.resource.data.fcmTokenGeneration >= resource.data.get('fcmTokenGeneration',0));
+         request.resource.data.fcmTokenGeneration is int && (request.resource.data.fcmTokenGeneration > resource.data.get('fcmTokenGeneration',0) || (request.resource.data.fcmTokenGeneration == resource.data.get('fcmTokenGeneration',0) && request.resource.data.fcmToken == resource.data.get('fcmToken','') && request.resource.data.fcmTokenOwnerUid == resource.data.get('fcmTokenOwnerUid',''))));
+    }
+    function stageValid(key) {
+      return !request.resource.data.diff(resource.data).affectedKeys().hasAny([key]) ||
+        (request.resource.data[key] is int && request.resource.data[key] == resource.data.get('refreshRequestedAt',0) && request.resource.data[key] >= resource.data.get(key,0));
+    }
+    function childStateValid() {
+      return stageValid('refreshReceivedFor') && stageValid('refreshServiceFor') && stageValid('refreshAckFor') &&
+        stageValid('refreshLocatingFor') && stageValid('refreshPersistedFor') && stageValid('refreshUploadedFor') &&
+        stageValid('refreshCompletedFor') && stageValid('refreshFailedFor') &&
+        (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['locationTime']) ||
+          (request.resource.data.locationTime is int && request.resource.data.locationTime >= resource.data.get('locationTime',0))) &&
+        (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['refreshResult']) ||
+          !(resource.data.get('refreshCompletedFor',0) == resource.data.get('refreshRequestedAt',-1) || resource.data.get('refreshFailedFor',0) == resource.data.get('refreshRequestedAt',-1)) ||
+          request.resource.data.refreshResult == resource.data.get('refreshResult',''));
     }
     match /devices/child-01 {
       allow read: if parent() || child();
       allow create: if (parent() && request.resource.data.keys().hasOnly(commandKeys()) && request.resource.data.refreshRequestedBy == request.auth.uid && request.resource.data.refreshExpiresAt == request.resource.data.refreshRequestedAt + 900000) ||
         (child() && !request.resource.data.keys().hasAny(commandKeys()) && !request.resource.data.keys().hasAny(serverKeys()) && (!request.resource.data.keys().hasAny(['fcmToken']) || request.resource.data.fcmTokenOwnerUid == request.auth.uid));
       allow update: if (parent() && request.resource.data.diff(resource.data).affectedKeys().hasOnly(commandKeys()) && parentCommandValid()) ||
-        (child() && !request.resource.data.diff(resource.data).affectedKeys().hasAny(commandKeys()) && !request.resource.data.diff(resource.data).affectedKeys().hasAny(serverKeys()) && childTokenValid());
+        (child() && !request.resource.data.diff(resource.data).affectedKeys().hasAny(commandKeys()) && !request.resource.data.diff(resource.data).affectedKeys().hasAny(serverKeys()) && childTokenValid() && childStateValid());
       allow delete: if false;
       match /events/{eventId} {
         allow read: if parent() || child();
-        allow create, update: if child() && request.resource.data.type is string && request.resource.data.id is string && request.resource.data.time is int;
+        allow create: if child() && request.resource.data.type is string && request.resource.data.id is string && request.resource.data.time is int;
+        allow update: if child() && request.resource.data == resource.data;
         allow delete: if false;
       }
     }

@@ -5,7 +5,7 @@ const verifier = new FirebaseVerifier();
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
-    if (url.pathname === '/health' && request.method === 'GET') return Response.json({ service: 'family-location-wake', version: '2.2.11', configured: Boolean(env.PARENT_UID && env.CHILD_UID && env.GOOGLE_SERVICE_ACCOUNT_JSON) }, { headers: { 'Cache-Control': 'no-store' } });
+    if (url.pathname === '/health' && request.method === 'GET') return Response.json({ service: 'family-location-wake', version: '2.3.0', configured: Boolean(env.PARENT_UID && env.CHILD_UID && env.GOOGLE_SERVICE_ACCOUNT_JSON) }, { headers: { 'Cache-Control': 'no-store' } });
     if (url.pathname !== '/v1/wake') return Response.json({ error: 'not_found' }, { status: 404 });
     if (request.method !== 'POST') return Response.json({ error: 'method_not_allowed' }, { status: 405, headers: { Allow: 'POST' } });
     try {
