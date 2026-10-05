@@ -37,7 +37,7 @@ object ParentWakeBridge {
         val base = endpoint() ?: return Result("not_configured", false)
         if (System.currentTimeMillis() >= request + 15 * 60_000L) return Result("expired", false)
         return try {
-            if (EnrollmentClient.ensureRegistered(context, base, "parent") != uid) return Result("identity_changed", false)
+            if (EnrollmentClient.ensureRegistered(context, base, "parent", BuildConfig.BOOTSTRAP_TOKEN) != uid) return Result("identity_changed", false)
             val data = EnrollmentClient.signed(context, base, "parent", "wake", JSONObject()
                 .put("deviceId", "child-01").put("requestId", request.toString()).put("requestedAt", request))
             if (data.optString("requestId") == request.toString()) Result(data.optString("status", "accepted"), false, true)
@@ -88,7 +88,7 @@ class ParentWakeWorker(context: Context, params: WorkerParameters) : Worker(cont
         if (id <= 0L || System.currentTimeMillis() >= id + 15 * 60_000L || runAttemptCount >= 8) return Result.failure()
         if (FirebaseAuth.getInstance().currentUser?.uid != uid) return Result.failure()
         try {
-            EnrollmentClient.ensureRegistered(applicationContext, BuildConfig.WAKE_WORKER_URL, "parent")
+            EnrollmentClient.ensureRegistered(applicationContext, BuildConfig.WAKE_WORKER_URL, "parent", BuildConfig.BOOTSTRAP_TOKEN)
             val written = try { Tasks.await(ParentWakeBridge.durableCommand(id, uid), 20, TimeUnit.SECONDS) } catch (_: Exception) { ParentCommandRest.write(id, uid) }
             if (!written || isStopped) return if (isStopped) Result.success() else Result.retry()
             val sent = ParentWakeBridge.send(applicationContext, id, uid)

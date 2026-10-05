@@ -13,9 +13,17 @@ repo = Path(__file__).resolve().parent.parent
 parser = argparse.ArgumentParser()
 parser.add_argument('--build-root', type=Path, required=True)
 parser.add_argument('--evidence-root', type=Path, required=True)
+parser.add_argument('--output-directory', type=Path)
+parser.add_argument('--bootstrap-manifest', type=Path)
 args = parser.parse_args()
 build, evidence = args.build_root.resolve(), args.evidence_root.resolve()
-out = repo / 'out/v231'
+out = args.output_directory.resolve() if args.output_directory else repo / 'out/v231'
+if args.bootstrap_manifest:
+    assert not out.is_relative_to(repo), 'Private provisioned APK output must remain outside Git'
+    manifest = json.loads(args.bootstrap_manifest.read_text(encoding='utf-8-sig'))
+    assert set(manifest) == {'familyId','deviceId','versionName','versionCode','roles'}
+    assert set(manifest['roles']) == {'parent','child'}
+    assert all(set(v) == {'sha256','expiresAt'} for v in manifest['roles'].values())
 sha = lambda path: hashlib.sha256(path.read_bytes()).hexdigest()
 logs = {key: (evidence / name).read_text(encoding='utf-8-sig') for key, name in {
     'build': 'build-v231.log', 'worker': 'worker-tests-v231.log',
@@ -23,10 +31,10 @@ logs = {key: (evidence / name).read_text(encoding='utf-8-sig') for key, name in 
     'signing': 'signing-regression-v231.log'}.items()}
 assert 'BUILD SUCCESSFUL' in logs['build'] and 'BUILD FAILED' not in logs['build']
 assert 'ALL CORE TESTS PASSED' in logs['build'] and 'SCENARIO TEST PASSED' in logs['build']
-assert re.search(r'pass 45\b', logs['worker']) and re.search(r'fail 0\b', logs['worker'])
+assert re.search(r'pass 58\b', logs['worker']) and re.search(r'fail 0\b', logs['worker'])
 assert 'PASS: actual workerd/SQLite:' in logs['runtime']
-assert 'PASS: 51 actual Firestore emulator' in logs['rules']
-assert 'PASS: 69 signing regressions.' in logs['signing']
+assert 'PASS: 59 actual Firestore emulator' in logs['rules']
+assert 'PASS: 73 signing regressions.' in logs['signing']
 inputs = {}
 for path in (repo / 'appsrc').rglob('*'):
     relative = path.relative_to(repo / 'appsrc')
@@ -43,7 +51,7 @@ for module in ['child-app', 'enrollment', 'parent-app']:
     issues = ET.parse(build/module/'build/reports/lint-results-release.xml').getroot().findall('issue')
     assert not any(i.get('severity') in {'Error', 'Fatal'} for i in issues)
     lint[module] = {'errors': 0, 'warnings': sum(i.get('severity') == 'Warning' for i in issues)}
-assert tests['child-app'] == 26 and tests['enrollment'] == 7
+assert tests['child-app'] == 26 and tests['enrollment'] == 11
 out.mkdir(parents=True, exist_ok=True)
 assert not list(out.glob('*Installable.apk')), 'Existing signed artifacts require separate review; do not overwrite'
 sums = []
@@ -62,11 +70,14 @@ shutil.copy2(evidence/'v231-ANDROID-BUILD-TOOLS.json', out/'ANDROID-BUILD-TOOLS.
 for name in ['build-v231.log', 'worker-tests-v231.log', 'runtime-v231.log', 'rules-v231.log', 'signing-regression-v231.log']:
     shutil.copy2(evidence/name, out/name)
 gate = {'status': 'PASS', 'VersionName': '2.3.1', 'VersionCode': 35,
-        'inputHashes': inputs, 'tests': tests, 'lint': lint, 'workerTests': 45,
-        'rulesAssertions': 51, 'signingRegressions': 69, 'workerdSQLite': 'PASS (mock Google only)',
+        'inputHashes': inputs, 'testedSourceHashes': {name: sha(repo/name) for name in subprocess.check_output(['git','ls-files','--','appsrc','cloudflare-wake','scripts'], cwd=repo, text=True).splitlines() if 'docs' not in Path(name).parts and Path(name).name != 'README.md'}, 'tests': tests, 'lint': lint, 'workerTests': 58,
+        'rulesAssertions': 59, 'signingRegressions': 73, 'workerdSQLite': 'PASS (mock Google only)',
         'commit': subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=repo, text=True).strip(),
-        'signing': 'PENDING LOCAL PASSWORD', 'physicalDevice': 'NOT VERIFIED', 'production': 'STOPPED FOR REVIEW'}
+        'bootstrap': 'LOCAL PRIVATE PROVISIONED' if args.bootstrap_manifest else 'UNPROVISIONED REVIEW ONLY',
+        'signing': 'STOPPED FOR REVIEW', 'physicalDevice': 'NOT VERIFIED', 'production': 'STOPPED FOR REVIEW'}
+if args.bootstrap_manifest:
+    shutil.copy2(args.bootstrap_manifest, out/'BOOTSTRAP-PROVISIONING.json')
 (out/'AUTOMATED-GATE.json').write_text(json.dumps(gate, indent=2) + '\n', encoding='utf-8')
 (out/'SHA256SUMS.txt').write_text('\n'.join(sums) + '\n', encoding='utf-8')
-print('PASS: tested input hashes and both unsigned APK archives. Local secure signing remains pending.')
+print('PASS: tested input hashes and both unsigned APK archives. No signing performed; unprovisioned CI/review APKs are blocked by the signing gate.')
 print('\n'.join(sums))

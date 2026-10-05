@@ -2,6 +2,7 @@ import { initializeTestEnvironment, assertSucceeds, assertFails } from '@firebas
 import { doc, setDoc, getDoc, deleteDoc } from 'firebase/firestore';
 import { readFileSync } from 'node:fs';
 import assert from 'node:assert/strict';
+import { randomBytes,createHash } from 'node:crypto';
 import { GoogleApi } from '../src/google.js';
 const env = await initializeTestEnvironment({ projectId: 'demo-family-location-wake', firestore: { host: '127.0.0.1', port: 8086, rules: readFileSync('.wrangler/test-fixture.rules', 'utf8') } });
 await env.clearFirestore(); // Reset localhost demo fixtures only, never a cloud project.
@@ -68,5 +69,16 @@ try {
   await assert.rejects(()=>api.updateChildToken(family,'test-child',{token:'new-token-0000',generation:101},now)); count++;
   assert.equal((await api.readDocument(api.docUrl())).fcmTokenGeneration,100); count++;
   await deny(setDoc(doc(child,path),{fcmToken:'direct-sdk-token',fcmTokenGeneration:102},{merge:true}));
+  // A client cannot provision or reopen a bootstrap slot, even with role auth.
+  for(const db of [parent,child,stranger]) await deny(setDoc(doc(db,'families/family-01'),{parentBootstrapConsumed:false,parentBootstrapHash:createHash('sha256').update(randomBytes(32)).digest('base64url')},{merge:true}));
+  // Actual REST single-document CAS atomically publishes owner and consumption.
+  family=await api.readFamily();
+  const hash=createHash('sha256').update(randomBytes(32)).digest('base64url');
+  const next={...family,parentUid:'replacement-parent',parentBootstrapConsumed:true,parentBootstrapHash:hash};
+  assert.equal(await api.writeFamily(family,next),true);count++;
+  assert.equal(await api.writeFamily(family,{...family,parentUid:'racing-parent',parentBootstrapConsumed:false}),false);count++;
+  const committed=await api.readFamily();assert.equal(committed.parentUid,'replacement-parent');assert.equal(committed.parentBootstrapConsumed,true);assert.equal(committed.parentBootstrapHash,hash);count++;
+  await deny(getDoc(doc(parent,path)));
+  await pass(getDoc(doc(env.authenticatedContext('replacement-parent').firestore(),path)));
   console.log(`PASS: ${count} actual Firestore emulator security-rule assertions. Fixture UIDs/project only; no production writes.`);
 } finally { await env.cleanup(); }

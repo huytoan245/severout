@@ -1,183 +1,66 @@
-# Family Location v2.3.1: thiết kế để review trước production
+# Family Location v2.3.1 / code35 — role bootstrap review
 
-Trạng thái: implementation/test candidate; CHƯA deploy. Baseline là commit
-`0ced7ae2f096773eef6a019bb63d709c7877b422` của v2.3.0. Hai APK v2.3.0 đã
-được kiểm tra lại độc lập: package, code34, certificate, zipalign và ZIP checksum PASS.
-Signer giữ nguyên `62b909ff3c5e6b56565cfe2814913778acdf694f32a042f12bc05c35404ed63f`.
+Status: NO SIGNING, NO PRODUCTION DEPLOYMENT. Private personal sideload: exactly one Parent and one Child. Firebase Spark + Cloudflare Workers Free + FCM HTTP v1. No manual UID, QR or pairing code in either app.
 
-## Nguyên nhân kiến trúc cũ cần UID thủ công
+## Cause and change
 
-Anonymous Auth tạo runtime UID, nhưng v2.3.0 chưa có enrollment authority.
-Worker so JWT với `PARENT_UID`; token owner so với `CHILD_UID`; renderer Rules
-nhúng hai UID. Vì vậy một bản cài sạch tạo identity khác nhưng không có đường
-được backend công nhận tự động. Firebase UID không phải role và client tự
-khai role trong dữ liệu cũng không đủ để được tin cậy.
+The previous empty-slot policy accepted any valid Firebase identity plus a device-key proof while enrollment was enabled. That proved control of a key, not ownership of this family. An outsider could register first without possessing either private APK.
 
-## Thiết kế mới
+An empty role now additionally requires its own 256-bit bootstrap capability. Parent and Child have distinct values; both are scoped to family-01 and their role; the logical Child is child-01. Missing provisioning, a wrong/other-role token, expiry or consumed token fails closed. ENROLLMENT_ENABLED remains an optional operator kill switch; it never authorizes a claim by itself. Automatic locking does not require toggling it after pairing.
 
-Một family cố định `family-01`, một Parent và một Child logical id `child-01`.
-`families/family-01` do service account server tạo/cập nhật qua Firestore REST:
-`parentUid`, `parentKey`, `parentRegisteredAt`, `childUid`, `childKey`,
-`childRegisteredAt`, `childDeviceId`, `epoch`, `locked`. Không client nào
-được ghi/xóa mapping. Không có UID cố định trong APK, Rules hoặc Worker secrets.
+## Protocol and persistent authority
 
-Mỗi app tự anonymous sign-in, tự tạo một khóa EC P-256 trong Android Keystore,
-lấy server nonce rồi ký payload đăng ký. Private key thiết bị không được export.
-Key này độc lập với release JKS; không tạo hay đổi APK signer. Không cần Play
-Store, QR, pairing code, backend password, copy UID hay token.
+The operator provisions HASHES ONLY in families/family-01 before distributing APKs. Initial bootstrap-plan.mjs emits an offline create-only REST commit proposal (exists=false); it cannot replace an existing family. No UID is supplied. Fields include epoch=1, role BootstrapHash (SHA-256 of the exact canonical base64url capability string, encoded as base64url), BootstrapExpiresAt and BootstrapConsumed=false. Separate role fields enforce scope; shared hashes are rejected. Capability generator uses .NET cryptographic RandomNumberGenerator.GetBytes(32), no padding base64url, and seven-day expiry.
 
-FamilyRegistry dùng SQLite Durable Object cho nonce/rate/dedupe; Firestore
-`currentDocument.exists=false` hoặc `updateTime` CAS quyết định ai thắng slot.
-Đăng ký thành công đầu tiên thắng. UID khác/key khác không thể thay chủ slot,
-một UID không thể nhận cả hai role. Khi đủ hai UID thì locked. Duplicate cùng
-UID/key được xác nhận idempotently; không mở lại slot khi offline hoặc timeout.
+1. App signs in anonymously and creates/reuses its non-exportable Android Keystore P-256 device key. This is independent of the APK release JKS.
+2. Worker verifies Firebase JWT against the fixed project and derives UID; clients cannot choose UID in the request.
+3. Authenticated challenge fixes family/device/role/purpose/epoch, creates a random 120-second nonce and reports needsBootstrap. A stranger cannot obtain an occupied role challenge.
+4. For an empty slot, the app signs the registration payload INCLUDING its capability. Signature binds UID, role, family/device, purpose, nonce and payload digest. Body size and exact field sets are enforced.
+5. Registry verifies nonce, epoch, signature, public key, empty slot, hash, unconsumed state and expiry. The entire conditional Firestore REST commit writes owner UID/key/registeredAt AND consumed=true/consumedAt/claimProofHash in ONE document write using currentDocument.updateTime. Concurrent attempts cannot both win. A failed precondition or write cannot consume without claiming.
+6. Nonce/proof fingerprint and response are journaled in SQLite. Firestore also stores the committed claim proof hash. After a lost response, only the identical still-valid nonce/proof for the committed UID/key is idempotent; a fresh proof bearing that consumed token is rejected, even from the same owner. No plaintext capability is persisted by the server.
+7. After nonce expiry or a cold app restart, the registered UID/key can resume with a fresh signed registration payload that OMITS bootstrap. This confirms existing membership and never claims a different slot. If only one of UID/key survives uninstall, the mismatch fails closed.
 
-Các endpoint ở cùng origin hiện tại:
+Runtime wake/token uses strict payloads without any bootstrap field. Diagnostics/family state requires mapped UID. GPS, journey and events use Firestore Rules based on the server-owned role mapping. Client token writes remain denied; backend token CAS checks Child UID/key/epoch. UID and epoch changes invalidate prior authority. A third UID, changed device key, replayed signature or recovered old identity cannot take over.
 
-| Endpoint | Quyền và hành vi |
+When both roles are present locked=true and both capabilities are consumed. Registered clients cannot edit/delete family mapping, bootstrap hashes, consumed flags or recovery records. Hashes are not Firebase/Cloudflare/FCM/admin credentials. No plaintext capability is in server configuration, source, docs, committed fixtures or CI logs; tests generate random values in memory.
+
+## APK leak and remaining threat model
+
+This removes anonymous pre-enrollment squatting by someone who lacks a valid role capability. It DOES NOT prove which human owns an APK: a leaked private APK before enrollment can reveal its embedded one-time capability. A thief who has it can race the intended phone for THAT empty role until expiry/revocation. Secure private distribution and operator recovery/revocation remain necessary. After consumption, APK extraction does not supply the registered UID plus device private key and cannot reclaim the slot.
+
+This is NOT hardware attestation, Play Integrity or public Play Store onboarding. Android Keystore protects key extraction; we do not attest hardware/software provenance. A compromised already-enrolled phone, privileged operator/service-account compromise, availability attacks and theft of the private build/config directory remain outside this capability guarantee. Initial operator provisioning/deployment still occurs before distribution, never as end-user setup after installation.
+
+Sources: [Android Keystore](https://developer.android.com/privacy-and-security/keystore), [Firestore atomic writes](https://firebase.google.com/docs/firestore/manage-data/transactions).
+
+## Update and explicit recovery
+
+Update/reboot/process restart retain existing Firebase UID and device key and do not need a bootstrap token. Full uninstall/clear data can lose them; no automatic takeover path is added. Existing production identities are not cleared or migrated implicitly.
+
+recovery-plan.mjs remains OFFLINE, with no cloud/apply option. It now requires --hashes containing fresh role hashes. It increments epoch, retires old UID hashes and every recovered-role bootstrap hash, clears only selected role ownership and claim fingerprint, preserves the other role, and atomically clears Child FCM authority/revises generation when recovering Child. Old or previously retired capability hashes cannot be reused. The server also refuses hashes listed in retiredBootstrapHashes. Location and events are preserved.
+
+Example proposal only, after obtaining an admin-read normalized snapshot and generating NEW capabilities outside Git:
+
+```powershell
+node .\cloudflare-wake\recovery-plan.mjs --snapshot 'C:\Users\Admin\Documents\FamilyLocation-Bootstrap\recovery-snapshot.json' --role child --hashes 'C:\Users\Admin\Documents\FamilyLocation-Bootstrap\v231-recovery\BOOTSTRAP-PROVISIONING.json' --output 'C:\Users\Admin\Documents\FamilyLocation-Bootstrap\child-recovery-review.json'
+```
+
+Review and cloud application require a separate future operator action; no production write is performed here. Only the recovered role receives new server authorization. Capabilities for the unaffected role need no provisioning or runtime use.
+
+## Validation A–O
+
+| Requirement | Actual coverage |
 |---|---|
-| `POST /v1/challenge` | Firebase JWT hợp lệ, role/purpose/ID cố định; nonce 120 giây |
-| `POST /v1/register/parent` | Proof-of-possession; claim Parent slot qua CAS |
-| `POST /v1/register/child` | Proof-of-possession; claim Child slot qua CAS |
-| `GET /v1/family` | Chỉ UID đã đăng ký; trả boolean pairing, role và epoch |
-| `POST /v1/token` | Chỉ UID + key Child; token revision monotonic |
-| `POST /v1/wake` | Chỉ UID + key Parent; command cố định child-01 |
-| `GET /v1/diagnostics` | Chỉ UID đã đăng ký; không trả token/private material |
-| `GET /health` | Version/configured boolean; không trả credential |
+| A/B correct Parent/Child | Both installation orders, distinct random capabilities, paired lock |
+| C/D wrong values | Random wrong values reject; owner/consumed unchanged |
+| E/F role swap | Opposite-role capability rejects for both roles |
+| G consumed replay | Fresh proof rejected, including original UID/key |
+| H third UID/stale extracted token | Third UID and different key rejected after restart |
+| I concurrency | Multiple contenders and two registry instances; exactly one owner per role |
+| J atomic failure | Injected pre-commit failure leaves owner and consume unchanged; real emulator stale CAS does not alter either |
+| K response loss | Commit succeeds then response lost; identical proof retry succeeds and keeps owner |
+| L paired | Both consumed, lock=true; bootstrap-bearing fresh proof rejected |
+| M runtime | Wake and token succeed without bootstrap; added bootstrap fields rejected |
+| N persistence | Registry restart and real workerd/SQLite restart retain consumed ownership |
+| O Rules | Actual emulator denies all client hash/consume edits; changing server mapping revokes old Parent and grants replacement Parent |
 
-JWT kiểm RS256, Google key signature, project, issuer, expiry và subject;
-UID caller được lấy từ JWT, không tin UID trong body. Proof ký chuỗi UTF-8:
-`FL231\nfamily-01\nchild-01\nrole\nuid\nnonce\npurpose\nbase64url(SHA256(payload))`.
-Android chuyển chữ ký DER thành r||s 64 bytes cho WebCrypto. Nonce ràng buộc
-UID/role/purpose/epoch. Server persist hash proof trước side effect; retry chỉ
-được dùng đúng proof đó. Proof hết hạn hoặc có epoch cũ không được replay.
-App persist proof bằng SharedPreferences.commit trước POST và retry background
-qua WorkManager với exponential backoff, giữ proof tối đa 90 giây.
-
-Worker giới hạn body 8192 bytes, payload 3072, token 2048; từ chối field lạ,
-family/device lạ, role overwrite, signature sai, nonce reuse khác payload.
-Registry có rate limit persist 32 request/UID/phút và 96 request/family/phút;
-wake giữ giới hạn 12/phút, TTL 15 phút, tối đa tám lần thử. Alarm dọn nonce/rate
-không bị hoãn vô hạn bởi traffic liên tục. Các giới hạn cũng có thể trì hoãn
-người dùng hợp lệ khi có spam; chúng không phải bảo đảm chống DDoS toàn diện.
-
-FCM token nằm tại device document, chỉ server được ghi qua token endpoint;
-Rules chặn token writes trực tiếp của mọi client, kể cả Child. Child ký rotation
-bằng key đã đăng ký. Commit token cùng conditional epoch write trên family
-để membership và token CAS atomic. Không overwrite revision cũ/equal-but-different.
-Child tự rebase revision theo server khi dữ liệu v2.3.0 có revision lớn hơn.
-Firestore device state/journey events hiện tại được giữ, không xóa collection.
-
-WakeCoordinator kiểm lại current mapping mỗi attempt và ngay trước FCM send.
-Request durable gắn Parent UID + epoch. Reset identity làm old pending wake
-fail closed. Chỉ dùng token có owner bằng current registered Child UID.
-Caller không chọn token, Child UID hay logical device khác. FCM acceptance
-không được hiển thị thành GPS success; ACK/journal/checkpoint/idempotency cũ giữ.
-
-Parent đăng ký background và realtime-listen family. Trạng thái chờ là
-“Đang chờ Máy Con kết nối”; sau Child registration chuyển sang
-“Máy Con · Đang kết nối” rồi áp dụng Health/freshness thật. UI Child và các câu
-đã khóa không thay đổi. Enrollment/FCM lỗi không chặn UI hoặc journal GPS.
-
-## Trust và giới hạn bootstrap
-
-Android Keystore tăng trust về việc nắm private key của bản cài đã đăng ký.
-Nó KHÔNG tự chứng minh người đăng ký đầu tiên là chủ gia đình, cũng không tự
-chứng minh APK được ký bởi release certificate. Public release SHA trong APK
-hoặc tự khai certificate là thông tin có thể bị sao chép, không phải credential.
-Hardware backing tùy thiết bị; không tuyên bố mọi key đều hardware-backed.
-
-Không bật attestation bắt buộc: cần kiểm chain/root/revocation và certificate
-extensions server-side, hỗ trợ thiết bị sideload không đồng nhất. Không dùng
-Play Integrity bắt buộc hay giả attestation. Lựa chọn triển khai hiện tại là
-device-key proof + first-wins đúng yêu cầu tối thiểu, với rủi ro pre-enrollment
-squatting được nêu rõ. Một attacker có thể anonymous sign-in vào project công
-khai, tạo key của họ và chiếm slot còn trống trước chủ nhà. Sau khi slot có chủ
-thì không tự takeover được. Muốn bảo đảm chủ nhà là người đầu tiên cần thêm
-trust anchor (attestation/pinned pre-provisioned install keys/pairing ceremony),
-và điều này thay đổi mô hình zero-setup hiện tại. Không âm thầm thêm master secret.
-
-Cửa sổ enrollment đầu tiên cần được review và giám sát vì rủi ro first-wins.
-Sau khi hai app tự đăng ký, backend tự khóa cả hai slot; KHÔNG cần người dùng
-đổi Cloudflare Secrets/vars hoặc Rules sau khi cài. `ENROLLMENT_ENABLED` chỉ là
-công tắc operator cho maintenance hoặc đóng enrollment trước go-live; không
-có bước bắt buộc tắt công tắc sau khi pair. URL giữ nguyên
-`https://family-location-wake.huytoan0979928450.workers.dev`.
-
-Firestore client state access vẫn dựa trên Firebase JWT UID + server mapping;
-Rules không thể tự verify chữ ký Keystore. Device proof bảo vệ enrollment,
-token và wake; nó không biến mọi SDK Firestore location/command write thành
-attested hardware operation. Rooted device/app compromise vẫn là rủi ro.
-
-## Reinstall và recovery
-
-Update APK cùng signer/package, reboot hoặc process restart giữ app data,
-Firebase identity và Keystore entry; retry dùng cùng slot. Token rotation không
-làm mất pairing. Cả hai manifest đã tắt Android backup; không dùng backup để
-tự dựng lại identity/private key. Clear app data có cùng rủi ro như uninstall.
-
-Full uninstall mất anonymous identity và private key. Bản cài mới KHÔNG được
-tự chiếm lại slot cũ, kể cả nếu người dùng nói đó là cùng điện thoại. Chỉ UID
-hoặc tên thiết bị/certificate public không đủ bằng chứng. Backend trả slot occupied.
-
-Recovery là luồng riêng cho operator có quyền Google IAM admin trên máy:
-
-1. Đóng enrollment, dừng/đợi request đang chạy; xác nhận chính chủ yêu cầu recovery.
-2. Đọc snapshot mapping + updateTime và device revision bằng admin identity.
-   Không yêu cầu end user lấy/copy UID, token hoặc gửi credential vào chat.
-3. Lưu audit mapping cũ (không lưu private key/token). Tạo kế hoạch CAS bằng
-   `cloudflare-wake/recovery-plan.mjs`, không có network hoặc apply trong script.
-4. Review kế hoạch: increment epoch; chỉ clear slot bị mất; giữ slot còn lại. Thêm hash UID bị thu hồi vào
-   server-controlled retiredUidHashes để identity cũ không claim lại slot trong
-   cửa sổ maintenance. Mỗi recovery vẫn cần giám sát first-wins cho UID mới.
-   Nếu Child bị mất, atomically vô hiệu owner/token cũ và tăng token revision.
-   Giữ nguyên location state và events. CAS thất bại thì đọc lại và review lại,
-   không retry overwrite mù.
-5. Sau phê duyệt riêng, operator gửi commit bằng admin IAM, mở enrollment có
-   giám sát cho slot đó, app mới tự claim; paired thì backend tự khóa slot.
-   Operator có thể đóng công tắc maintenance riêng; không yêu cầu người dùng sửa UID.
-
-Không có reset public endpoint, timeout takeover, secret recovery trong APK
-hay thao tác xóa cloud đã tự chạy. Recovery mất credential không thể vừa
-zero-touch vừa bảo đảm identity trong mô hình này. Nếu cả hai bản cài mất
-credential, operator phải recovery cả hai slot. Đây là ngoại lệ maintenance,
-không phải bước cài sạch lần đầu hay sử dụng hàng ngày.
-
-## Migration và deploy boundary
-
-v2.3.1/code35 giữ packages, family/device IDs và release signer. Mapping mới
-ban đầu không có UID: hai app update tự enroll với identity hiện tại. Không
-tự import UID từ secrets v2.3.0, không sửa/xóa cloud để giả test thành công.
-Renderer Rules chỉ nhận `--output`, không nhận UID. PARENT_UID/CHILD_UID không
-còn được runtime đọc; server chỉ cần fixed project + Google service-account
-credential và DO bindings. Firebase Spark + Workers Free + FCM HTTP v1 là
-mục tiêu giữ nguyên; không deploy Firebase Functions/Blaze. Cần kiểm quota
-thực tế trước go-live, không tuyên bố unlimited miễn phí.
-
-Phải triển khai backend mới và Rules mới theo kế hoạch migration được duyệt,
-rồi cho app v2.3.1 enroll. Trong khoảng Rules/mapping thay đổi, v2.3.0 có thể
-bị permission denied; không cập nhật Rules production độc lập rồi coi old app
-đã được chuyển. Anonymous Auth phải được bật và không tự cleanup identity
-đang sử dụng. Service account chỉ lưu Cloudflare secret, không APK/Git.
-
-## Bằng chứng và phần chưa kiểm tra
-
-Xem `VALIDATION_V231.md` để biết lệnh và kết quả thực chạy. Các A–N có model
-tests với crypto thật và fault injection; Android proof/journal tests kiểm
-serialization, chữ ký và cold-client retry. Test workerd dùng SQLite thực,
-Google network được intercept; Rules dùng Firestore emulator thật. Đây không
-phải test A–N trên hai điện thoại vật lý. APK update/uninstall/reboot/Android
-Keystore persistence và Android WorkManager process death cần kiểm trên máy.
-
-Chưa kiểm: production FCM, end-to-end Parent refresh/Child ACK/GPS production,
-Samsung endurance, app foreground/background restrictions, giao diện trạng
-thái realtime trên máy thật, Android permissions flow trên máy thật. Bản mới
-chưa signed cho đến khi người dùng nhập password trực tiếp trong PowerShell.
-
-STOP trước production để review; không merge master, không install/uninstall,
-không tạo/xóa/overwrite release keystore.
-
-Nguồn thiết kế: [Android Keystore](https://developer.android.com/privacy-and-security/keystore),
-[Android attestation](https://developer.android.com/privacy-and-security/security-key-attestation),
-[Firestore REST Write/preconditions](https://docs.cloud.google.com/firestore/docs/reference/rest/v1/Write),
-[Firestore Rules authorization](https://firebase.google.com/docs/rules/basics).
+See VALIDATION_V231.md for measured counts and limitations; BOOTSTRAP_RELEASE_V231.md for local preparation. CI/debug/review APKs contain no capability, cannot enroll a fresh phone, and are blocked by the signing gate. They are not installable release deliverables.

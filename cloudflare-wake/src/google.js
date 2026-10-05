@@ -89,8 +89,10 @@ export class GoogleApi {
     try { return ['FAILED_PRECONDITION', 'ABORTED'].includes((await response.clone().json()).error?.status); } catch { return false; }
   }
   async writeFamily(previous, values) {
-    const query = new URLSearchParams(previous.updateTime ? { 'currentDocument.updateTime': previous.updateTime } : { 'currentDocument.exists': 'false' });
-    const r = await this.call(this.familyUrl() + '?' + query, { method: 'PATCH', body: JSON.stringify({ fields: this.fields(values) }) });
+    // Use the documented Write precondition in an atomic commit, rather than
+    // relying on PATCH query parsing for the authoritative enrollment CAS.
+    const writes = [{ update: { name: this.familyUrl().split('/v1/')[1], fields: this.fields(values) }, currentDocument: previous.updateTime ? { updateTime: previous.updateTime } : { exists: false } }];
+    const r = await this.call(this.docUrl().replace('/documents/devices/child-01', '/documents:commit'), { method: 'POST', body: JSON.stringify({ writes }) });
     if (await this.conflict(r)) return false;
     if (!r.ok) throw new ApiError('registration_write_failed', 503, true);
     return true;

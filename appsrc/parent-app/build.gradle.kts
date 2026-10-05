@@ -1,4 +1,5 @@
 import java.net.URI
+import java.util.Base64
 
 plugins {
     id("com.android.application")
@@ -6,6 +7,11 @@ plugins {
     id("com.google.gms.google-services")
 }
 val wakeWorkerUrl = providers.gradleProperty("wakeWorkerUrl").orElse(providers.environmentVariable("FAMILY_LOCATION_WAKE_WORKER_URL")).orElse("https://family-location-wake.huytoan0979928450.workers.dev").get()
+// Local private release input only. CI/debug APKs remain unprovisioned.
+val bootstrapToken = providers.environmentVariable("FAMILY_LOCATION_PARENT_BOOTSTRAP").orElse("").get()
+require(bootstrapToken.isEmpty() || (Regex("[A-Za-z0-9_-]{43}").matches(bootstrapToken) &&
+    Base64.getUrlEncoder().withoutPadding().encodeToString(Base64.getUrlDecoder().decode(bootstrapToken)) == bootstrapToken)) { "Invalid role bootstrap format" }
+require(!(System.getenv("CI") == "true" && bootstrapToken.isNotEmpty())) { "Bootstrap injection is forbidden in CI" }
 val workerOrigin = URI(wakeWorkerUrl)
 require(workerOrigin.scheme == "https" && !workerOrigin.host.isNullOrBlank() && workerOrigin.rawUserInfo == null &&
     workerOrigin.rawQuery == null && workerOrigin.rawFragment == null && (workerOrigin.path.isNullOrEmpty() || workerOrigin.path == "/")) { "Worker URL must be a public HTTPS origin without endpoint/path" }
@@ -20,6 +26,10 @@ android {
         buildConfigField("String", "WAKE_WORKER_URL", "\"$wakeWorkerUrl\"")
         versionCode = 35
         versionName = "2.3.1"
+    }
+    buildTypes {
+        getByName("debug") { buildConfigField("String", "BOOTSTRAP_TOKEN", "\"\"") }
+        getByName("release") { buildConfigField("String", "BOOTSTRAP_TOKEN", "\"$bootstrapToken\"") }
     }
     buildFeatures { compose = true; buildConfig = true }
     compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }

@@ -137,7 +137,10 @@ try {
     # keystore or installable APK; this tests failure/control flow, not real signing.
     $copy = Join-Path $root 'repo'
     foreach ($dir in @('scripts', 'docs', 'appsrc', 'out')) { New-Item -ItemType Directory -Path (Join-Path $copy $dir) | Out-Null }
-    foreach ($name in @('ReleaseSigning.Common.ps1', 'sign-release.ps1', 'validate-signed-release.ps1')) { Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) -Destination (Join-Path $copy 'scripts') }
+    foreach ($name in @('ReleaseSigning.Common.ps1', 'Bootstrap.Common.ps1', 'sign-release.ps1', 'validate-signed-release.ps1')) { Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) -Destination (Join-Path $copy 'scripts') }
+    # Control-flow fixtures cannot represent real provisioned DEX; separately
+    # test the actual bootstrap scanner in test-bootstrap.ps1 with random inputs.
+    [IO.File]::AppendAllText((Join-Path $copy 'scripts/Bootstrap.Common.ps1'), "`nfunction Assert-BootstrapApkPair { }", [Text.UTF8Encoding]::new($false))
     $fixtureStage = Join-Path $root 'staging'
     New-Item -ItemType Directory -Path $fixtureStage | Out-Null
     $copiedGate = Join-Path $copy 'scripts/sign-release.ps1'

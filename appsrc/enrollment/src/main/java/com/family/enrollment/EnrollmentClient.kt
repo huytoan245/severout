@@ -19,7 +19,7 @@ object EnrollmentClient {
         val uid = FirebaseAuth.getInstance().currentUser?.uid ?: return false
         return context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString("registered_$role", null) == uid
     }
-    @Synchronized fun ensureRegistered(context: Context, base: String, role: String, force: Boolean = false): String {
+    @Synchronized fun ensureRegistered(context: Context, base: String, role: String, bootstrap: String, force: Boolean = false): String {
         require(role == "parent" || role == "child")
         val auth = FirebaseAuth.getInstance()
         if (auth.currentUser == null) Tasks.await(auth.signInAnonymously(), 20, TimeUnit.SECONDS)
@@ -28,7 +28,7 @@ object EnrollmentClient {
         val publicKey = DeviceIdentity.publicKey()
         if (!force && prefs.getString("registered_$role", null) == uid && prefs.getString("registered_key", null) == publicKey) return uid
         val result = try {
-            signed(context, base, role, "register", JSONObject().put("familyId", "family-01").put("deviceId", "child-01").put("version", "2.3.1"))
+            signed(context, base, role, "register", JSONObject().put("familyId", "family-01").put("deviceId", "child-01").put("version", "2.3.1"), bootstrap)
         } catch (e: EnrollmentFailure) {
             if (e.status == 403 && !e.retryable) prefs.edit().remove("registered_$role").commit()
             throw e
@@ -37,7 +37,7 @@ object EnrollmentClient {
         check(prefs.edit().putString("registered_$role", uid).putString("registered_key", publicKey).commit())
         return uid
     }
-    @Synchronized fun signed(context: Context, base: String, role: String, purpose: String, payload: JSONObject): JSONObject {
+    @Synchronized fun signed(context: Context, base: String, role: String, purpose: String, payload: JSONObject, bootstrap: String = ""): JSONObject {
         val user = FirebaseAuth.getInstance().currentUser ?: throw EnrollmentFailure("no_auth", 503)
         val uid = user.uid
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -47,8 +47,9 @@ object EnrollmentClient {
         if (pending == null) {
             val challenge = call(base, "/v1/challenge", JSONObject().put("familyId", "family-01").put("deviceId", "child-01").put("role", role).put("purpose", purpose), uid)
             val nonce = challenge.getString("nonce")
-            val proof = JSONObject().put("nonce", nonce).put("signature", DeviceIdentity.sign(EnrollmentProof.message(uid, role, nonce, purpose, raw)))
-                .put("publicKey", DeviceIdentity.publicKey()).put("payload", raw)
+            val signedRaw = BootstrapPayload.forChallenge(purpose, payload, challenge, bootstrap).toString()
+            val proof = JSONObject().put("nonce", nonce).put("signature", DeviceIdentity.sign(EnrollmentProof.message(uid, role, nonce, purpose, signedRaw)))
+                .put("publicKey", DeviceIdentity.publicKey()).put("payload", signedRaw)
             pending = JSONObject().put("uid", uid).put("purpose", purpose).put("payload", raw).put("savedAt", System.currentTimeMillis()).put("proof", proof)
             journal.save(pending)
         }

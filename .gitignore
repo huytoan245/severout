@@ -24,3 +24,7 @@ cloudflare-wake/.wrangler/
 *.key
 .env*
 *firebase-adminsdk*.json
+
+# Defense in depth: private bootstrap inputs must still live outside this repository.
+*bootstrap.private*
+*bootstrap-secrets*

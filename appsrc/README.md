@@ -53,3 +53,6 @@ The Parent app no longer embeds Google Maps SDK.
 ## Test strategy
 
 Core visit/trip logic remains pure Kotlin and can be tested independently of Android/Firebase. See `docs/TEST-REPORT.md`.
+
+
+The v231 empty-slot authorization now requires a separate one-time role bootstrap capability. CI APKs are UNPROVISIONED review builds and blocked by the signing gate. Operator hash provisioning/private local build occurs before distribution; no end-user UID/code/QR/configuration is added. See ../docs/BOOTSTRAP_RELEASE_V231.md and ../docs/ZERO_SETUP_PAIRING_V231.md. STOP before signing/deploy for review.

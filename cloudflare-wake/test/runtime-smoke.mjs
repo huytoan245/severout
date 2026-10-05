@@ -13,7 +13,11 @@ const persist = mkdtempSync(join(tmpdir(), 'family-wake-runtime-test-'));
 // Ephemeral TEST service-account key only; every outbound URL is intercepted.
 const { privateKey, publicKey: rsaPublic } = generateKeyPairSync('rsa', { modulusLength: 2048 });
 const sa = { project_id: 'family-location-884e5', client_email: 'fixture@family-location-884e5.iam.gserviceaccount.com', private_key: privateKey.export({type:'pkcs8',format:'pem'}) };
-let family = null, device = null, revision = 0, fcmSends = 0;
+const capabilities={parent:b64(crypto.getRandomValues(new Uint8Array(32))),child:b64(crypto.getRandomValues(new Uint8Array(32)))};
+let family={updateTime:'provisioned',fields:{familyId:{stringValue:'family-01'},childDeviceId:{stringValue:'child-01'},epoch:{integerValue:'1'},
+  ...Object.fromEntries(await Promise.all(['parent','child'].map(async role=>[role+'BootstrapHash',{stringValue:await digest(capabilities[role])}]))),
+  ...Object.fromEntries(['parent','child'].flatMap(role=>[[role+'BootstrapConsumed',{booleanValue:false}],[role+'BootstrapExpiresAt',{integerValue:String(Date.now()+604800000)}]]))
+}},device=null,revision=0,fcmSends=0;
 const testJwt = (uid, overrides = {}) => {
   const sec=Math.floor(Date.now()/1000);
   const h=b64(new TextEncoder().encode(JSON.stringify({alg:'RS256',kid:'runtime-fixture'})));
@@ -66,7 +70,7 @@ try {
   // Restart real workerd after durable challenge, before registration response.
   await mf.dispose(); mf = new Miniflare(options);
   registryNs = await mf.getDurableObjectNamespace('FAMILY_REGISTRY'); registry=registryNs.get(registryNs.idFromName('family-01'));
-  const payload=JSON.stringify({familyId:'family-01',deviceId:'child-01',version:'2.3.1'});
+  const payload=JSON.stringify({familyId:'family-01',deviceId:'child-01',version:'2.3.1',bootstrap:capabilities.parent});
   const signature=b64(await crypto.subtle.sign({name:'ECDSA',hash:'SHA-256'},pair.privateKey,new TextEncoder().encode(proofMessage('test-parent','parent',nonce,'register',await digest(payload)))));
   const proof={nonce,signature,publicKey,payload};
   assert.equal((await publicCall('test-parent','/v1/register/parent',proof)).status,200);
@@ -78,7 +82,7 @@ try {
     const nonce=(await response.json()).nonce,payload=JSON.stringify(values);
     return {nonce,publicKey:childPublic,payload,signature:b64(await crypto.subtle.sign({name:'ECDSA',hash:'SHA-256'},childKeys.privateKey,new TextEncoder().encode(proofMessage('test-child','child',nonce,purpose,await digest(payload)))))};
   };
-  assert.equal((await publicCall('test-child','/v1/register/child',await childProof('register',{familyId:'family-01',deviceId:'child-01',version:'2.3.1'}))).status,200);
+  assert.equal((await publicCall('test-child','/v1/register/child',await childProof('register',{familyId:'family-01',deviceId:'child-01',version:'2.3.1',bootstrap:capabilities.child}))).status,200);
   assert.equal((await publicCall('test-parent','/v1/family')).status,200);
   assert.equal((await publicCall('outsider','/v1/family')).status,403);
   assert.equal((await publicCall('test-parent','/v1/family',null,{aud:'wrong-project'})).status,401);
@@ -94,5 +98,6 @@ try {
   assert.equal((await stub.fetch(req())).status,429);
   registryNs=await mf.getDurableObjectNamespace('FAMILY_REGISTRY');registry=registryNs.get(registryNs.idFromName('family-01'));
   assert.equal((await call(registry,'test-parent','registerParent',proof)).status,200);
+  assert.equal(family.fields.parentBootstrapConsumed.booleanValue,true);assert.equal(family.fields.childBootstrapConsumed.booleanValue,true);
   console.log('PASS: actual workerd/SQLite: public Firebase JWT verification, Parent/Child enrollment, token CAS and HIGH FCM dispatch; persisted nonce/enrollment/rate after restart; unauthorized UID/project denied. All Google traffic intercepted; no production deployment.');
 } finally { await mf.dispose(); }

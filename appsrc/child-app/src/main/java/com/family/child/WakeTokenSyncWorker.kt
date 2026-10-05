@@ -23,7 +23,7 @@ class WakeTokenSyncWorker(appContext: Context, params: WorkerParameters) : Worke
         fun status(value: String) { prefs.edit().putString("fcm_token_worker_result_v229", value).apply() }
         prefs.edit().putLong("fcm_token_worker_run_at_v229", System.currentTimeMillis()).apply()
         try {
-            val uid = EnrollmentClient.ensureRegistered(app, BuildConfig.WAKE_WORKER_URL, "child")
+            val uid = EnrollmentClient.ensureRegistered(app, BuildConfig.WAKE_WORKER_URL, "child", BuildConfig.BOOTSTRAP_TOKEN)
             val before = TokenState.current(app)
             val sdkToken = Tasks.await(FirebaseMessaging.getInstance().token, 20, TimeUnit.SECONDS)
             val current = TokenState.observe(app, sdkToken, before.generation)

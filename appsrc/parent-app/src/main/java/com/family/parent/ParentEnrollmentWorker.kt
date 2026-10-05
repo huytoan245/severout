@@ -10,7 +10,7 @@ import java.util.concurrent.TimeUnit
 class ParentEnrollmentWorker(context: Context, params: WorkerParameters) : Worker(context, params) {
     override fun doWork(): Result {
         return try {
-            EnrollmentClient.ensureRegistered(applicationContext, BuildConfig.WAKE_WORKER_URL, "parent", force = true)
+            EnrollmentClient.ensureRegistered(applicationContext, BuildConfig.WAKE_WORKER_URL, "parent", BuildConfig.BOOTSTRAP_TOKEN, force = true)
             FirebaseFirestore.getInstance().enableNetwork()
             applicationContext.getSharedPreferences("wake_diag", Context.MODE_PRIVATE).edit().putString("enrollment", "registered").apply()
             Result.success()

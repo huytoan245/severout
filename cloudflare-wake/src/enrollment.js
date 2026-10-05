@@ -57,10 +57,13 @@ export class FamilyRegistry {
           if (owner && owner !== uid) throw new ApiError('slot_occupied', 403);
           if (uid === f[(body.role === 'parent' ? 'child' : 'parent') + 'Uid']) throw new ApiError('role_conflict', 403);
           if (body.purpose !== 'register' && owner !== uid) throw new ApiError('role_not_registered', 403);
-          if (!owner && this.env.ENROLLMENT_ENABLED !== 'true') throw new ApiError('enrollment_closed', 403);
+          if (!owner) {
+            if (this.env.ENROLLMENT_ENABLED !== 'true') throw new ApiError('enrollment_closed', 403);
+            this.bootstrapAvailable(f, body.role);
+          }
           const nonce = b64(crypto.getRandomValues(new Uint8Array(32))), expires = this.clock() + 120000;
           await this.ctx.storage.put('nonce:' + nonce, { uid, role: body.role, purpose: body.purpose, expires, epoch: f.epoch || 1 });
-          return json({ nonce, expires });
+          return json({ nonce, expires, needsBootstrap: body.purpose === 'register' && !owner });
         }
         const role = operation === 'registerParent' || operation === 'wake' ? 'parent' : 'child';
         const purpose = operation.startsWith('register') ? 'register' : operation;
@@ -80,7 +83,15 @@ export class FamilyRegistry {
         if (f[role + 'Uid'] && (f[role + 'Uid'] !== uid || f[role + 'Key'] !== body.publicKey)) throw new ApiError('slot_occupied', 403);
         if (purpose !== 'register' && (!f[role + 'Uid'] || f[role + 'Key'] !== body.publicKey)) throw new ApiError('role_not_registered', 403);
         if (purpose === 'register') {
-          if (!exact(payload, ['familyId', 'deviceId', 'version']) || payload.familyId !== 'family-01' || payload.deviceId !== 'child-01' || payload.version !== '2.3.1') throw new ApiError('invalid_request', 400);
+          if (!(exact(payload, ['familyId', 'deviceId', 'version']) || exact(payload, ['familyId', 'deviceId', 'version', 'bootstrap'])) || payload.familyId !== 'family-01' || payload.deviceId !== 'child-01' || payload.version !== '2.3.1') throw new ApiError('invalid_request', 400);
+          if (f[role + 'Uid']) {
+            // Only the identical committed claim can retry a consumed capability.
+            // A fresh proof for the existing UID/key must omit bootstrap entirely.
+            if (Object.hasOwn(payload, 'bootstrap') && f[role + 'ClaimProofHash'] !== hash) throw new ApiError('bootstrap_consumed', 403);
+          } else {
+            this.bootstrapAvailable(f, role);
+            if (typeof payload.bootstrap !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(payload.bootstrap) || b64(unb64(payload.bootstrap)) !== payload.bootstrap || await digest(payload.bootstrap) !== f[role + 'BootstrapHash']) throw new ApiError('invalid_bootstrap', 403);
+          }
         } else if (purpose === 'token') {
           if (!exact(payload, ['familyId', 'deviceId', 'token', 'generation']) || payload.familyId !== 'family-01' || payload.deviceId !== 'child-01' || typeof payload.token !== 'string' || payload.token.length < 10 || payload.token.length > 2048 || !/^[A-Za-z0-9_:\-.]+$/.test(payload.token) || !Number.isSafeInteger(payload.generation) || payload.generation < 1) throw new ApiError('invalid_request', 400);
         } else validateRequest(payload, this.clock());
@@ -91,7 +102,9 @@ export class FamilyRegistry {
           if (uid === f[(role === 'parent' ? 'child' : 'parent') + 'Uid']) throw new ApiError('role_conflict', 403);
           if (!f[role + 'Uid']) {
             if (this.env.ENROLLMENT_ENABLED !== 'true') throw new ApiError('enrollment_closed', 403);
-            const next = { ...f, familyId: 'family-01', childDeviceId: 'child-01', epoch: f.epoch || 1, [role + 'Uid']: uid, [role + 'Key']: body.publicKey, [role + 'RegisteredAt']: this.clock() };
+            // One conditional Firestore document write claims AND consumes. No
+            // plaintext capability is persisted in Firestore or durable storage.
+            const next = { ...f, familyId: 'family-01', childDeviceId: 'child-01', epoch: f.epoch || 1, [role + 'Uid']: uid, [role + 'Key']: body.publicKey, [role + 'RegisteredAt']: this.clock(), [role + 'BootstrapConsumed']: true, [role + 'BootstrapConsumedAt']: this.clock(), [role + 'ClaimProofHash']: hash };
             next.locked = Boolean(next.parentUid && next.childUid);
             if (!await this.api.writeFamily(f, next)) throw new ApiError('registration_raced', 409, true);
             result = { ...familyState(next), registered: true, role };
@@ -109,5 +122,9 @@ export class FamilyRegistry {
         return json(result);
       } catch (e) { return json({ error: e instanceof ApiError ? e.code : 'backend_unavailable', ...(Number.isSafeInteger(e.requiredGeneration) ? { requiredGeneration: e.requiredGeneration } : {}) }, e instanceof ApiError ? e.status : 503); }
     });
+  }
+  bootstrapAvailable(f, role) {
+    if (!f.updateTime || !/^[A-Za-z0-9_-]{43}$/.test(f[role + 'BootstrapHash'] || '') || (f.retiredBootstrapHashes || '').split(',').includes(f[role + 'BootstrapHash']) || f.parentBootstrapHash === f.childBootstrapHash || f[role + 'BootstrapConsumed'] !== false) throw new ApiError('bootstrap_unavailable', 403);
+    if (!Number.isSafeInteger(f[role + 'BootstrapExpiresAt']) || f[role + 'BootstrapExpiresAt'] <= this.clock()) throw new ApiError('bootstrap_expired', 403);
   }
 }

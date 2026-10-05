@@ -74,3 +74,11 @@ if code == 35:
         text=path.read_text(encoding='utf-8-sig')
         assert 'env.PARENT_UID' not in text and 'env.CHILD_UID' not in text
     print('v231 automatic enrollment, dynamic roles and device proof static checks passed')
+
+if code == 35:
+    contains(root/'cloudflare-wake/src/enrollment.js',['bootstrapAvailable','BootstrapConsumed','ClaimProofHash','bootstrap_consumed'])
+    contains(root/'appsrc/enrollment/src/main/java/com/family/enrollment/BootstrapPayload.kt',['needsBootstrap','purpose == "register"','bootstrap_not_provisioned'])
+    contains(root/'scripts/sign-release.ps1',['Assert-BootstrapApkPair'])
+    for role in ['parent','child']:
+        contains(root/f'appsrc/{role}-app/build.gradle.kts',[f'FAMILY_LOCATION_{role.upper()}_BOOTSTRAP','Bootstrap injection is forbidden in CI','BOOTSTRAP_TOKEN'])
+    print('v231 role bootstrap, hash-only atomic consumption and unprovisioned signing block checks passed')

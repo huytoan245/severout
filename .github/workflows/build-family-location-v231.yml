@@ -11,6 +11,8 @@ jobs:
     timeout-minutes: 45
     env:
       WRANGLER_SEND_METRICS: 'false'
+      FAMILY_LOCATION_PARENT_BOOTSTRAP: ''
+      FAMILY_LOCATION_CHILD_BOOTSTRAP: ''
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -47,19 +49,22 @@ jobs:
         run: python3 -X utf8 scripts/validate.py
       - name: Existing signer recovery and paired signing gate regression (no private key)
         shell: pwsh
-        run: ./scripts/test-release-signing.ps1 -JavaHome $env:JAVA_HOME
+        run: |
+          ./scripts/test-release-signing.ps1 -JavaHome $env:JAVA_HOME
+          ./scripts/test-bootstrap.ps1
       - name: Core, journal/token, Android build and full lint
         working-directory: appsrc
         run: gradle -I ../scripts/capture-build-tools.gradle captureSigningBuildTools -PfamilySigningMetadata="$GITHUB_WORKSPACE/out/ANDROID-BUILD-TOOLS.json" :core:coreSelfCheck :core:scenarioCheck :enrollment:testDebugUnitTest :child-app:testDebugUnitTest :parent-app:assembleRelease :child-app:assembleRelease :enrollment:lintRelease :parent-app:lintRelease :child-app:lintRelease --console=plain --stacktrace
-      - name: Verify APK alignment and collect unsigned candidate (existing signer; local secure password required)
+      - name: Verify APK alignment and collect UNPROVISIONED review APKs (signing blocked)
         run: |
           mkdir -p out/cloudflare-wake
+          echo 'UNPROVISIONED REVIEW ONLY: no bootstrap capabilities; signing gate blocks these APKs.' > out/BOOTSTRAP-STATUS.txt
           cp appsrc/parent-app/build/outputs/apk/release/parent-app-release-unsigned.apk out/Family-Parent-v2.3.1-unsigned.apk
           cp appsrc/child-app/build/outputs/apk/release/child-app-release-unsigned.apk out/Family-Child-v2.3.1-unsigned.apk
           "$ANDROID_HOME/build-tools/36.0.0/zipalign" -c -P 16 4 out/Family-Parent-v2.3.1-unsigned.apk
           "$ANDROID_HOME/build-tools/36.0.0/zipalign" -c -P 16 4 out/Family-Child-v2.3.1-unsigned.apk
           cp -r cloudflare-wake/src cloudflare-wake/test out/cloudflare-wake/
-          cp cloudflare-wake/package*.json cloudflare-wake/wrangler.jsonc cloudflare-wake/firebase-test.json cloudflare-wake/render-rules.mjs out/cloudflare-wake/
+          cp cloudflare-wake/package*.json cloudflare-wake/wrangler.jsonc cloudflare-wake/firebase-test.json cloudflare-wake/render-rules.mjs cloudflare-wake/bootstrap-plan.mjs cloudflare-wake/recovery-plan.mjs out/cloudflare-wake/
           cp -r docs scripts out/
           git archive --format=zip --output=out/Family-Location-v2.3.1-Source.zip HEAD
           sha256sum out/*.apk out/*Source.zip > out/SHA256SUMS.txt

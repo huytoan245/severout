@@ -10,6 +10,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'ReleaseSigning.Common.ps1')
+. (Join-Path $PSScriptRoot 'Bootstrap.Common.ps1')
 $VersionCode = if ($Version -ceq '2.3.1') { 35 } else { 34 }
 $releaseTag = $Version.Replace('.', '')
 if (-not $UnsignedDirectory) { $UnsignedDirectory = Join-Path $PSScriptRoot ('..\out\v' + $releaseTag) }
@@ -48,6 +49,7 @@ foreach ($app in @('Parent', 'Child')) {
     if ($alignment.ExitCode -ne 0) { throw "Unsigned 16KiB zipalign failed for $name`: $($tools.Zipalign)" }
     } finally { Remove-ReleaseNativeApkInput $inputFile }
 }
+if ($Version -ceq '2.3.1') { Assert-BootstrapApkPair $UnsignedDirectory }
 if ($CheckEnvironmentOnly) { Write-Output 'Environment/unsigned input gates PASS. No password read, keystore inspection/signing or Installable publication performed.'; return }
 $stage = Join-Path ([IO.Path]::GetTempPath()) ('family-location-sign-' + [guid]::NewGuid().ToString('N'))
 $previous = $env:FAMILY_LOCATION_KS_PASSWORD

@@ -1,4 +1,5 @@
 import test from 'node:test';
+import { createHash } from 'node:crypto';
 import assert from 'node:assert/strict';
 import { FamilyRegistry, digest, proofMessage } from '../src/enrollment.js';
 import { GoogleApi, b64 } from '../src/google.js';
@@ -20,11 +21,19 @@ async function installation(uid, role) {
 }
 function harness() {
   const storage = new Storage(), documents = new Map(), sent = [];
-  let revision = 0, now = NOW, offline = false, crash = false;
+  let revision = 0, now = NOW, offline = false, crash = false, failWrite = false;
+  // Fresh test capabilities in memory only, never literal fixture secrets.
+  const caps = { parent: b64(crypto.getRandomValues(new Uint8Array(32))), child: b64(crypto.getRandomValues(new Uint8Array(32))) };
+  const hash = token => createHash('sha256').update(token).digest('base64url');
+  documents.set('families/family-01', { updateTime:'provisioned', fields:{
+    familyId:{stringValue:'family-01'}, childDeviceId:{stringValue:'child-01'}, epoch:{integerValue:'1'},
+    ...Object.fromEntries(['parent','child'].flatMap(role=>[[role+'BootstrapHash',{stringValue:hash(caps[role])}], [role+'BootstrapConsumed',{booleanValue:false}], [role+'BootstrapExpiresAt',{integerValue:String(NOW+604800000)}]]))
+  }});
   const api = new GoogleApi({});
   api.call = async (url, options = {}) => {
     if (offline) throw new Error('offline');
     if (url.endsWith('/documents:commit')) {
+      if (failWrite) { failWrite=false; throw new Error('before_atomic_write'); }
       const writes = JSON.parse(options.body).writes;
       for (const w of writes) {
         const path = w.update.name.split('/documents/')[1], previous = documents.get(path);
@@ -39,6 +48,7 @@ function harness() {
     }
     const parsed = new URL(url), path = parsed.pathname.split('/documents/')[1], previous = documents.get(path);
     if (options.method === 'PATCH') {
+      if (failWrite) { failWrite=false; throw new Error('before_atomic_write'); }
       const time = parsed.searchParams.get('currentDocument.updateTime');
       if ((time && previous?.updateTime !== time) || (parsed.searchParams.get('currentDocument.exists') === 'false' && previous)) return new Response('', { status: 409 });
       documents.set(path, { fields: JSON.parse(options.body).fields, updateTime: String(++revision) });
@@ -56,12 +66,12 @@ function harness() {
   const proof = async (who, purpose, payload) => {
     const c = await call(who, 'challenge', { familyId: 'family-01', deviceId: 'child-01', role: who.role, purpose });
     if (c.status !== 200) return c;
-    const raw = JSON.stringify(payload);
+    const raw = JSON.stringify(purpose === 'register' && c.body.needsBootstrap && !Object.hasOwn(payload,'bootstrap') ? {...payload,bootstrap:caps[who.role]} : payload);
     const signature = b64(await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, who.pair.privateKey, new TextEncoder().encode(proofMessage(who.uid, who.role, c.body.nonce, purpose, await digest(raw)))));
     return { nonce: c.body.nonce, signature, publicKey: who.publicKey, payload: raw };
   };
   const enroll = async who => { const p = await proof(who, 'register', { familyId: 'family-01', deviceId: 'child-01', version: '2.3.1' }); return p.status ? p : call(who, who.role === 'parent' ? 'registerParent' : 'registerChild', p); };
-  return { api, env, storage, documents, sent, call, proof, enroll, offline(v) { offline = v; }, crashAfterCommit() { crash = true; }, advance(ms) { now += ms; }, restart() { registry = new FamilyRegistry({ storage }, env, api, () => now); }, otherInstance() { const other = new FamilyRegistry({ storage: new Storage() }, env, api, () => now); return async (who, operation, body) => { const r = await other.fetch(new Request('https://internal', { method: 'POST', body: JSON.stringify({ uid: who.uid, operation, body }) })); return { status: r.status, body: await r.json() }; }; } };
+  return { api, env, storage, documents, sent, call, proof, enroll, caps, failNextWrite() { failWrite=true; }, offline(v) { offline = v; }, crashAfterCommit() { crash = true; }, advance(ms) { now += ms; }, restart() { registry = new FamilyRegistry({ storage }, env, api, () => now); }, otherInstance() { const other = new FamilyRegistry({ storage: new Storage() }, env, api, () => now); return async (who, operation, body) => { const r = await other.fetch(new Request('https://internal', { method: 'POST', body: JSON.stringify({ uid: who.uid, operation, body }) })); return { status: r.status, body: await r.json() }; }; } };
 }
 const tokenPayload = (token, generation) => ({ familyId: 'family-01', deviceId: 'child-01', token, generation });
 const wakePayload = () => ({ deviceId: 'child-01', requestId: String(NOW), requestedAt: NOW });
@@ -167,10 +177,68 @@ test('retired identity cannot reclaim a slot reopened by an explicit operator re
   f.fields.epoch = { integerValue: '2' }; f.fields.retiredUidHashes = { stringValue: await digest('old-parent') };
   delete f.fields.parentUid; delete f.fields.parentKey;
   assert.equal((await h.enroll(oldParent)).body.error, 'retired_identity');
-  assert.equal((await h.enroll(await installation('replacement-parent', 'parent'))).status, 200);
+  assert.equal((await h.enroll(await installation('replacement-parent', 'parent'))).body.error,'bootstrap_unavailable');
+  const fresh=b64(crypto.getRandomValues(new Uint8Array(32))); h.caps.parent=fresh;
+  f.fields.parentBootstrapHash={stringValue:await digest(fresh)}; f.fields.parentBootstrapConsumed={booleanValue:false};
+  assert.equal((await h.enroll(await installation('replacement-parent', 'parent'))).status,200);
 });
 test('steady traffic does not postpone nonce cleanup forever', async () => {
   const h = harness(), child = await installation('c', 'child'); await h.enroll(child);
   const firstAlarm = h.storage.alarm; h.advance(60000); await h.call(child, 'state');
   assert.equal(h.storage.alarm, firstAlarm);
+});
+
+const registerPayload = bootstrap => ({familyId:'family-01',deviceId:'child-01',version:'2.3.1',bootstrap});
+for(const role of ['parent','child']) {
+  test(`C/D ${role} wrong random bootstrap rejects without claim/consume`,async()=>{
+    const h=harness(), app=await installation(role,role), proof=await h.proof(app,'register',registerPayload(b64(crypto.getRandomValues(new Uint8Array(32)))));
+    assert.equal((await h.call(app,role==='parent'?'registerParent':'registerChild',proof)).body.error,'invalid_bootstrap');
+    const f=await h.api.readFamily();assert.ok(!f[role+'Uid']);assert.equal(f[role+'BootstrapConsumed'],false);
+  });
+  test(`E/F ${role} opposite role capability rejects`,async()=>{
+    const h=harness(),app=await installation(role,role),proof=await h.proof(app,'register',registerPayload(h.caps[role==='parent'?'child':'parent']));
+    assert.equal((await h.call(app,role==='parent'?'registerParent':'registerChild',proof)).body.error,'invalid_bootstrap');
+  });
+}
+test('G/L consumed token rejects fresh proof even for original UID/key, before and after pairing',async()=>{
+  const h=harness(),p=await installation('p','parent'),c=await installation('c','child');await h.enroll(p);
+  assert.equal((await h.call(p,'registerParent',await h.proof(p,'register',registerPayload(h.caps.parent)))).body.error,'bootstrap_consumed');
+  await h.enroll(c);
+  assert.equal((await h.call(c,'registerChild',await h.proof(c,'register',registerPayload(h.caps.child)))).body.error,'bootstrap_consumed');
+  assert.equal((await h.enroll(p)).status,200); // signed resume omits bootstrap
+});
+test('H/N stale token and proof reject third UID/different key after restart',async()=>{
+  const h=harness(),p=await installation('p','parent'),proof=await h.proof(p,'register',registerPayload(h.caps.parent));
+  await h.call(p,'registerParent',proof);h.restart(); const stranger=await installation('third','parent');
+  assert.equal((await h.call(stranger,'registerParent',proof)).status,403);
+  assert.equal((await h.proof(stranger,'register',registerPayload(h.caps.parent))).status,403);
+  assert.equal((await h.enroll(await installation('p','parent'))).status,403);
+  assert.equal((await h.api.readFamily()).parentBootstrapConsumed,true);
+});
+test('J atomic write failure leaves both owner and consume unchanged; same proof retries',async()=>{
+  const h=harness(),p=await installation('p','parent'),proof=await h.proof(p,'register',registerPayload(h.caps.parent));
+  h.failNextWrite();assert.equal((await h.call(p,'registerParent',proof)).status,503);
+  const f=await h.api.readFamily();assert.ok(!f.parentUid);assert.equal(f.parentBootstrapConsumed,false);assert.ok(!f.parentClaimProofHash);
+  h.restart();assert.equal((await h.call(p,'registerParent',proof)).status,200);
+});
+test('K exact claim proof after lost response is idempotent; persisted state contains hashes only',async()=>{
+  const h=harness(),p=await installation('p','parent'),proof=await h.proof(p,'register',registerPayload(h.caps.parent));
+  h.crashAfterCommit();assert.equal((await h.call(p,'registerParent',proof)).status,503);
+  const f=await h.api.readFamily();assert.equal(f.parentUid,'p');assert.equal(f.parentBootstrapConsumed,true);assert.equal(f.parentClaimProofHash,await digest(JSON.stringify(proof)));
+  h.restart();assert.equal((await h.call(p,'registerParent',proof)).status,200);
+  const state=JSON.stringify([...h.documents])+JSON.stringify([...h.storage.map]);assert.ok(!state.includes(h.caps.parent)&&!state.includes(h.caps.child));
+});
+test('M wake/token reject bootstrap fields and work with runtime UID/key proof alone',async()=>{
+  const h=harness(),p=await installation('p','parent'),c=await installation('c','child');await h.enroll(p);await h.enroll(c);
+  assert.equal((await h.call(c,'token',await h.proof(c,'token',{...tokenPayload('token-00000000',1),bootstrap:h.caps.child}))).status,400);
+  assert.equal((await h.call(c,'token',await h.proof(c,'token',tokenPayload('token-00000000',1)))).status,200);
+  assert.equal((await h.call(p,'wake',await h.proof(p,'wake',{...wakePayload(),bootstrap:h.caps.parent}))).status,400);
+  assert.equal((await h.call(p,'wake',await h.proof(p,'wake',wakePayload()))).status,200);
+});
+test('unprovisioned, expired, or identical role hashes fail closed',async()=>{
+  for(const mode of ['missing','expired','same']){
+    const h=harness(),p=await installation('p','parent'),fields=h.documents.get('families/family-01').fields;
+    if(mode==='missing')h.documents.clear();if(mode==='expired')fields.parentBootstrapExpiresAt={integerValue:String(NOW)};if(mode==='same')fields.childBootstrapHash=fields.parentBootstrapHash;
+    assert.equal((await h.enroll(p)).status,403);
+  }
 });
