@@ -97,10 +97,11 @@ thì không tự takeover được. Muốn bảo đảm chủ nhà là người 
 trust anchor (attestation/pinned pre-provisioned install keys/pairing ceremony),
 và điều này thay đổi mô hình zero-setup hiện tại. Không âm thầm thêm master secret.
 
-Phải chuẩn bị và giám sát cửa sổ enrollment đầu tiên trước production, cài hai
-app ngay khi mở, rồi tắt `ENROLLMENT_ENABLED` sau khi paired. Đây là thao tác
-operator ban đầu, không phải UID/config sau mỗi lần mở hoặc update APK. Khi đã
-paired, logic vẫn khóa hai slot kể cả nếu flag chưa tắt. URL giữ nguyên
+Cửa sổ enrollment đầu tiên cần được review và giám sát vì rủi ro first-wins.
+Sau khi hai app tự đăng ký, backend tự khóa cả hai slot; KHÔNG cần người dùng
+đổi Cloudflare Secrets/vars hoặc Rules sau khi cài. `ENROLLMENT_ENABLED` chỉ là
+công tắc operator cho maintenance hoặc đóng enrollment trước go-live; không
+có bước bắt buộc tắt công tắc sau khi pair. URL giữ nguyên
 `https://family-location-wake.huytoan0979928450.workers.dev`.
 
 Firestore client state access vẫn dựa trên Firebase JWT UID + server mapping;
@@ -133,7 +134,8 @@ Recovery là luồng riêng cho operator có quyền Google IAM admin trên máy
    Giữ nguyên location state và events. CAS thất bại thì đọc lại và review lại,
    không retry overwrite mù.
 5. Sau phê duyệt riêng, operator gửi commit bằng admin IAM, mở enrollment có
-   giám sát cho slot đó, app mới tự claim; paired thì đóng enrollment.
+   giám sát cho slot đó, app mới tự claim; paired thì backend tự khóa slot.
+   Operator có thể đóng công tắc maintenance riêng; không yêu cầu người dùng sửa UID.
 
 Không có reset public endpoint, timeout takeover, secret recovery trong APK
 hay thao tác xóa cloud đã tự chạy. Recovery mất credential không thể vừa
