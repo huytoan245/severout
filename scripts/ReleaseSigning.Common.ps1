@@ -80,6 +80,141 @@ function Get-ReleaseSignerPin {
     $script:ReleaseFingerprint
 }
 
+function Get-ReleaseBuildToolsCandidate {
+    param([string]$Directory, [string]$Version)
+    $missing = [Collections.Generic.List[string]]::new()
+    $aapt2 = Join-Path $Directory 'aapt2.exe'
+    $zipalign = Join-Path $Directory 'zipalign.exe'
+    foreach ($tool in @(@{ Name = 'aapt2.exe'; Path = $aapt2 }, @{ Name = 'zipalign.exe'; Path = $zipalign })) {
+        if (-not (Test-Path -LiteralPath $tool.Path -PathType Leaf)) { $missing.Add("Missing $($tool.Name): $($tool.Path)") }
+    }
+    # SDK's apksigner.bat wraps a JAR at one of these locations. Invoke the JAR
+    # directly, avoiding cmd.exe parsing and any dependency on the caller's PATH.
+    $jarPaths = @((Join-Path $Directory 'lib/apksigner.jar'), (Join-Path $Directory 'apksigner.jar'), (Join-Path $Directory '../framework/apksigner.jar'))
+    $jar = $jarPaths | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
+    if (-not $jar) { $missing.Add('Missing usable apksigner.jar: ' + ($jarPaths -join ', ') + '. apksigner.bat alone is not an implementation.') }
+    $properties = Join-Path $Directory 'source.properties'
+    if (Test-Path -LiteralPath $properties -PathType Leaf) {
+        $revision = [regex]::Match((Get-Content -LiteralPath $properties -Raw), '(?m)^Pkg.Revision\s*=\s*([^\r\n]+)')
+        if (-not $revision.Success -or $revision.Groups[1].Value.Trim() -cne $Version) { $missing.Add("Broken/preview package metadata: $properties (expected Pkg.Revision=$Version)") }
+    }
+    [pscustomobject]@{ Version = $Version; Directory = $Directory; Aapt2 = $aapt2; Zipalign = $zipalign; ApkSignerJar = $jar; Problems = @($missing.ToArray()); Complete = ($missing.Count -eq 0) }
+}
+
+function Resolve-ReleaseBuildTools {
+    param([string]$AndroidSdk, [string]$BuildToolsVersion, [string]$ProjectDirectory, [string]$MetadataPath)
+    $sdk = [IO.Path]::GetFullPath($AndroidSdk)
+    $base = Join-Path $sdk 'build-tools'
+    if (-not (Test-Path -LiteralPath $base -PathType Container)) { throw "Missing SDK build-tools directory: $base" }
+    if ($BuildToolsVersion) {
+        if ($BuildToolsVersion -notmatch '^\d+\.\d+\.\d+$') { throw "Explicit build-tools version must be stable: $BuildToolsVersion" }
+        $selected = Get-ReleaseBuildToolsCandidate (Join-Path $base $BuildToolsVersion) $BuildToolsVersion
+        if (-not $selected.Complete) { throw ("Requested build-tools $BuildToolsVersion failed:`n" + ($selected.Problems -join "`n")) }
+        $reason = 'explicit version'
+    } else {
+        $projectVersions = @()
+        if ($ProjectDirectory -and $MetadataPath -and (Test-Path -LiteralPath $MetadataPath -PathType Leaf)) {
+            $metadata = Get-Content -LiteralPath $MetadataPath -Raw | ConvertFrom-Json
+            $valid = $metadata.gradleFileHashes -and $metadata.modules
+            foreach ($property in $metadata.gradleFileHashes.PSObject.Properties) {
+                $file = Join-Path $ProjectDirectory $property.Name
+                if (-not (Test-Path -LiteralPath $file -PathType Leaf) -or (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant() -cne $property.Value) { $valid = $false }
+            }
+            if ($valid) { $projectVersions = @($metadata.modules.PSObject.Properties.Value | Sort-Object -Unique) }
+            else { Write-Host "Ignoring stale Android build-tools metadata: $MetadataPath" }
+        }
+        # Also honor an explicit version in Android build files if no captured
+        # evaluated AGP metadata is available. compileSdk is not buildToolsVersion.
+        if ($projectVersions.Count -eq 0 -and $ProjectDirectory -and (Test-Path -LiteralPath $ProjectDirectory)) {
+            $versions = foreach ($file in Get-ChildItem -LiteralPath $ProjectDirectory -Filter 'build.gradle*' -File -Recurse | Where-Object { $_.FullName -notmatch '[\\/](build|\.gradle)[\\/]' }) {
+                $matches = [regex]::Matches((Get-Content -LiteralPath $file.FullName -Raw), '(?m)^\s*buildToolsVersion\s*(?:=|\()?\s*["''](\d+\.\d+\.\d+)["'']')
+                foreach ($match in $matches) { $match.Groups[1].Value }
+            }
+            $projectVersions = @($versions | Sort-Object -Unique)
+        }
+        $selected = $null
+        $problems = [Collections.Generic.List[string]]::new()
+        foreach ($version in $projectVersions | Where-Object { $_ -match '^\d+\.\d+\.\d+$' } | Sort-Object { [version]$_ } -Descending) {
+            $candidate = Get-ReleaseBuildToolsCandidate (Join-Path $base $version) $version
+            if ($candidate.Complete) { $selected = $candidate; $reason = 'evaluated/project Android version'; break }
+            foreach ($problem in $candidate.Problems) { $problems.Add($problem) }
+        }
+        if (-not $selected) {
+            foreach ($directory in Get-ChildItem -LiteralPath $base -Directory | Where-Object { $_.Name -match '^\d+\.\d+\.\d+$' } | Sort-Object { [version]$_.Name } -Descending) {
+                $candidate = Get-ReleaseBuildToolsCandidate $directory.FullName $directory.Name
+                if ($candidate.Complete) { $selected = $candidate; $reason = 'highest complete installed stable version'; break }
+                foreach ($problem in $candidate.Problems) { $problems.Add($problem) }
+            }
+        }
+        if (-not $selected) { throw ("No complete stable build-tools under $base.`n" + (($problems | Select-Object -Unique) -join "`n")) }
+    }
+    $selected | Add-Member -NotePropertyName Reason -NotePropertyValue $reason
+    Write-Host "Build-tools selected: $($selected.Version) ($reason)"
+    Write-Host "aapt2: $($selected.Aapt2)"
+    Write-Host "zipalign: $($selected.Zipalign)"
+    Write-Host "apksigner: $($selected.ApkSignerJar)"
+    $selected
+}
+
+function Resolve-ReleaseSigningEnvironment {
+    param([string]$AndroidSdk, [string]$JavaHome, [string]$BuildToolsVersion, [string]$ProjectDirectory, [string]$MetadataPath)
+    foreach ($name in @('java.exe', 'keytool.exe')) {
+        $path = Join-Path $JavaHome "bin/$name"
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Missing $name`: $path" }
+    }
+    Resolve-ReleaseBuildTools $AndroidSdk $BuildToolsVersion $ProjectDirectory $MetadataPath
+}
+
+function Assert-ReleaseArchiveReadable {
+    param([string]$ArchivePath, [switch]$Apk)
+    $archive = [IO.Compression.ZipFile]::OpenRead($ArchivePath)
+    try {
+        $names = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+        $buffer = [byte[]]::new(1024 * 1024)
+        foreach ($entry in $archive.Entries) {
+            if (-not $names.Add($entry.FullName)) { throw "Duplicate ZIP entry: $($entry.FullName)" }
+            $stream = $entry.Open()
+            try {
+                $length = 0L
+                while (($count = $stream.Read($buffer, 0, $buffer.Length)) -gt 0) { $length += $count }
+                if ($length -ne $entry.Length) { throw 'ZIP entry decompressed length mismatch.' }
+            } finally { $stream.Dispose() }
+        }
+        if ($Apk -and (-not $names.Contains('AndroidManifest.xml') -or -not $names.Contains('classes.dex'))) { throw 'APK manifest/classes missing.' }
+    } finally { $archive.Dispose() }
+}
+
+function Get-ReleaseNativeApkInput {
+    param([string]$Apk)
+    $full = [IO.Path]::GetFullPath($Apk)
+    if ($full -notmatch '[^\x00-\x7F]') { return [pscustomobject]@{ Path = $full; Stage = $null } }
+    # Windows zipalign uses a narrow filename API. The same bytes pass at an
+    # ASCII path but fail at this project's Vietnamese path. .NET copies safely.
+    $temp = [IO.Path]::GetTempPath()
+    if ($temp -match '[^\x00-\x7F]') { throw "Native APK staging requires an ASCII TEMP directory: $temp" }
+    $stage = Join-Path $temp ('family-native-apk-' + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $stage | Out-Null
+    $copy = Join-Path $stage 'input.apk'
+    try {
+        Copy-Item -LiteralPath $full -Destination $copy
+        if ((Get-FileHash -LiteralPath $copy -Algorithm SHA256).Hash -cne (Get-FileHash -LiteralPath $full -Algorithm SHA256).Hash) { throw 'Native staging APK differs from original bytes.' }
+        [pscustomobject]@{ Path = $copy; Stage = $stage }
+    } catch {
+        if (Test-Path -LiteralPath $copy) { Remove-Item -LiteralPath $copy }
+        [IO.Directory]::Delete($stage)
+        throw
+    }
+}
+
+function Remove-ReleaseNativeApkInput {
+    param($InputFile)
+    if ($InputFile.Stage) {
+        Remove-Item -LiteralPath $InputFile.Path
+        # Nonrecursive: fails safely if an unexpected file appeared.
+        [IO.Directory]::Delete($InputFile.Stage)
+    }
+}
+
 function Assert-ReleaseApkIdentity {
     param([string]$Badging, [string]$Package)
     $match = [regex]::Match($Badging, "(?m)^package: name='([^']+)' versionCode='([^']+)' versionName='([^']+)'")
@@ -93,14 +228,19 @@ function Assert-ReleaseApkCertificate {
 }
 
 function Test-ReleaseApk {
-    param([string]$Apk, [string]$Package, [string]$Java, [string]$BuildTools, [string]$Expected)
-    $identity = Invoke-ReleaseTool (Join-Path $BuildTools 'aapt2.exe') @('dump', 'badging', $Apk)
+    param([string]$Apk, [string]$Package, [string]$Java, [string]$BuildTools, [string]$Expected, [string]$ApkSignerJar = (Join-Path $BuildTools 'lib/apksigner.jar'))
+    Assert-ReleaseArchiveReadable $Apk -Apk
+    $inputFile = Get-ReleaseNativeApkInput $Apk
+    try {
+    $nativeApk = $inputFile.Path
+    $identity = Invoke-ReleaseTool (Join-Path $BuildTools 'aapt2.exe') @('dump', 'badging', $nativeApk)
     if ($identity.ExitCode -ne 0) { throw 'APK badging failed.' }
     Assert-ReleaseApkIdentity $identity.Output $Package
-    $verify = Invoke-ReleaseTool $Java @('-jar', (Join-Path $BuildTools 'lib\apksigner.jar'), 'verify', '--verbose', '--print-certs', $Apk)
+    $verify = Invoke-ReleaseTool $Java @('-jar', $ApkSignerJar, 'verify', '--verbose', '--print-certs', $nativeApk)
     if ($verify.ExitCode -ne 0) { throw 'apksigner verify failed; output not promoted.' }
     Assert-ReleaseApkCertificate $verify.Output $Expected
-    $alignment = Invoke-ReleaseTool (Join-Path $BuildTools 'zipalign.exe') @('-c', '-P', '16', '4', $Apk)
+    $alignment = Invoke-ReleaseTool (Join-Path $BuildTools 'zipalign.exe') @('-c', '-P', '16', '4', $nativeApk)
     if ($alignment.ExitCode -ne 0) { throw '16KiB zipalign verification failed; output not promoted.' }
-    [pscustomobject]@{ Package = $Package; VersionName = '2.3.0'; VersionCode = 34; CertificateSha256 = $Expected; Signature = 'PASS'; Zipalign = 'PASS'; Sha256 = (Get-FileHash -LiteralPath $Apk -Algorithm SHA256).Hash.ToLowerInvariant(); Verification = $verify.Output }
+    [pscustomobject]@{ Package = $Package; VersionName = '2.3.0'; VersionCode = 34; CertificateSha256 = $Expected; Signature = 'PASS'; Zipalign = 'PASS'; Integrity = 'PASS (all ZIP entries readable and APK signature verified)'; Sha256 = (Get-FileHash -LiteralPath $Apk -Algorithm SHA256).Hash.ToLowerInvariant(); Verification = $verify.Output }
+    } finally { Remove-ReleaseNativeApkInput $inputFile }
 }

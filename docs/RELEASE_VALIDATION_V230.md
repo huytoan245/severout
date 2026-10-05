@@ -1,6 +1,6 @@
 # Family Location v2.3.0 – Clean Reliable Baseline
 
-03/10/2026 baseline validation; signer recovery update05/10/2026. versionName2.3.0/versionCode34. Audited baseline8f648142d67e275bfb571f6111f05f240ef97408. Branch v230-clean-reliable-baseline, Draft PR26 against v2211; no master edits/merge, no production changes. **Unsigned candidate only: existing signer creation/manual inspection now reported PASS by user; automated pin/sign awaits local password input. No Installable APK or signed Release ZIP.** See SIGNER_RECOVERY_V230.md for the reproduced PowerShell argument failure, read-only recovery and paired signing regression scope.
+03/10/2026 baseline validation; signing update05/10/2026. versionName2.3.0/versionCode34. Audited baseline8f648142d67e275bfb571f6111f05f240ef97408. Branch v230-clean-reliable-baseline, Draft PR26 against v2211; no master edits/merge, no production changes. **Unsigned candidate only: actual existing signer recovery/pin reported PASS and recorded locally; signing awaits direct local password input. No Installable APK or signed Release ZIP.** See SIGNING_ENVIRONMENT_V230.md for actual tool inventory, evaluated36.0.0, reproduced zipalign Unicode-path failure, repaired discovery/staging and55 signing regression checks.
 
 ## Nguyên nhân
 
@@ -16,7 +16,7 @@ Audit trước code: ARCHITECTURE_AUDIT_V230.md. v2211 Android source was genera
 - Cellular requests/probes use callback identity/generation, bounded probe queue and per-network gate; late unavailable/lost callbacks cannot clear replacement. VPN cancels pending binding as well as active binding. HTTP sockets close in finally. Existing healthy60s/degraded15s probe, fast actual-error signal, app-only cellular binding and cleanup retained.
 - Exact public origin defaults to https://family-location-wake.huytoan0979928450.workers.dev; build/runtime validate HTTPS origin/no endpoint and append /v1/wake once. Worker2.3.0 verifies token lifetime ordering and sends explicit child-01/requestedAt/expiresAt payload. Existing RS256/exact-UID/rate12/min/bounded8 attempts/TTL/SQLite alarms/rotation/invalid-token/at-least-once behavior remains.
 - Rules prevent stale request ACK/locationTime/token revision, same-revision token replacement, client backend spoof and history mutation. Existing events read by Parent, retry identical events allowed, deletes denied. No production rules/data/users modified.
-- Existing signer scripts accept only secure local input/environment, keystore outside repo, standard Family-Location-Release-2026.jks, exact existing alias and user-confirmed certificate. Recovery pins only after read-only DER verification; key generation is retired. Both APKs/ZIP/manifest are verified before promotion. Password/key not printed. Current automated pin remains NOT_CREATED; real recovery/signature/install gate awaits direct local input.
+- Existing signer scripts accept only secure local input/environment, keystore outside repo, standard Family-Location-Release-2026.jks, exact existing alias and certificate62b909ff3c5e6b56565cfe2814913778acdf694f32a042f12bc05c35404ed63f. Actual local recovery/pin completed by user; key generation retired. Evaluated/stable complete build-tools discovery and ASCII native staging preserve original bytes. Both APKs/ZIP/manifest are verified before promotion. Password/key not printed. Real APK signature/install gate awaits direct local input.
 
 ## Bảo toàn
 
@@ -53,7 +53,7 @@ CI status/exact commit, APK+ZIP SHA256, local logs/XML/lint reports and input-by
 
 ## Chưa kiểm tra
 
-Independent existing certificate inspection/pin/real signing/Installable/install acceptance (manual keytool PASS reported by user); Android emulator/physical device (adb devices empty); new Parent/Child UIDs and real exact-UID rules migration; Cloudflare production secrets/IAM/Free plan/real Firebase Spark plan; Worker production/FCM arrival/downgrade/service/GPS/ACK E2E; process reclaim/Doze/App Standby/Samsung Sleeping/Deep Sleeping/reboot/package-replace, radio/VPN/DNS and24–48h movement/screen-off endurance. UI/device system dialogs are not inferred from compile or API28 shadows.
+Real paired APK signing/Installable/install acceptance (local existing certificate recovery/pin PASS reported by user); Android emulator/physical device (adb devices empty at baseline); new Parent/Child UIDs and real exact-UID rules migration; Cloudflare production secrets/IAM/Free plan/real Firebase Spark plan; Worker production/FCM arrival/downgrade/service/GPS/ACK E2E; process reclaim/Doze/App Standby/Samsung Sleeping/Deep Sleeping/reboot/package-replace, radio/VPN/DNS and24–48h movement/screen-off endurance. UI/device system dialogs are not inferred from compile or API28 shadows.
 
 ## Rủi ro còn lại
 
@@ -65,4 +65,4 @@ Valid Firebase ID token revocation is not checked; exact new UID rules/secrets a
 
 Branch v230-clean-reliable-baseline. Draft PR against v2211, no merge. Unsigned Parent/Child2.3.0 candidates, Source ZIP, Candidate ZIP, SHA256 and evidence. No Family-*-Installable.apk or Family-Location-v2.3.0-Release.zip before signing gate.
 
-**DỪNG tại signer recovery:** chưa có password/signing input an toàn trong agent. Keystore hiện có không được tạo lại/overwrite/đổi alias. Người dùng chạy scripts/recover-release-signer.ps1 -SignAfterPin trực tiếp trong PowerShell7.2+, nhập mật khẩu cục bộ; không gửi secret. Script chỉ pin fingerprint sau khi xác minh đúng certificate hiện có, rồi ký và verify cả hai app. Chưa uninstall/clear data hay deploy production.
+**DỪNG tại signing:** pin hiện có đã PASS, nhưng chưa có password/signing input an toàn trong agent. Keystore không được tạo lại/overwrite/đổi alias. Người dùng chạy scripts/sign-release.ps1 trực tiếp trong PowerShell7.2+, nhập mật khẩu cục bộ; không gửi secret. Script rechecks certificate rồi ký/verify cả hai app. Người dùng báo đã gỡ app cũ; Codex không uninstall/install, clear data hay deploy production.

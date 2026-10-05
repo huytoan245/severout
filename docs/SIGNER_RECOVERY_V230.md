@@ -1,5 +1,7 @@
 # Existing v230 signer recovery — 05/10/2026
 
+Later update05/10/2026: user completed actual local recovery/pinning; RELEASE_SIGNING_V230.md now contains the exact verified certificate. The earlier stop-state below documents the original recovery turn. Current tool-discovery/Unicode diagnosis and signing readiness are in SIGNING_ENVIRONMENT_V230.md. Actual APK signing still awaits local input; do not create another signer.
+
 ## Cause and evidence
 
 Original post-creation command used unquoted `-J-Duser.language=en -J-Duser.country=US` directly in PowerShell. A password-free reproduction with the actual JDK17 keytool and `-help` returned exit1 and `Illegal option: .language=en`. Quoted arguments returned exit0. Key generation used no dotted JVM flags and had already succeeded. This failure does not establish any defect in the keystore/password/certificate; the user separately confirmed manual inspection PASS.

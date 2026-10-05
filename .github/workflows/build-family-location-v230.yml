@@ -50,7 +50,7 @@ jobs:
         run: ./scripts/test-release-signing.ps1 -JavaHome $env:JAVA_HOME
       - name: Core, journal/token, Android build and full lint
         working-directory: appsrc
-        run: gradle :core:coreSelfCheck :core:scenarioCheck :child-app:testDebugUnitTest :parent-app:assembleRelease :child-app:assembleRelease :parent-app:lintRelease :child-app:lintRelease --console=plain --stacktrace
+        run: gradle -I ../scripts/capture-build-tools.gradle captureSigningBuildTools -PfamilySigningMetadata="$GITHUB_WORKSPACE/out/ANDROID-BUILD-TOOLS.json" :core:coreSelfCheck :core:scenarioCheck :child-app:testDebugUnitTest :parent-app:assembleRelease :child-app:assembleRelease :parent-app:lintRelease :child-app:lintRelease --console=plain --stacktrace
       - name: Verify APK alignment and collect unsigned candidate (new signer pending)
         run: |
           mkdir -p out/cloudflare-wake

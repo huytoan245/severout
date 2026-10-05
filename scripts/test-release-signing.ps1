@@ -13,6 +13,11 @@ function Reject([scriptblock]$Action, [string]$Name) {
     try { & $Action | Out-Null } catch { $rejected = $true }
     Check $rejected $Name
 }
+function RejectWithPath([scriptblock]$Action, [string]$Tool, [string]$Path) {
+    $message = ''
+    try { & $Action | Out-Null } catch { $message = $_.Exception.Message }
+    Check ($message.Contains($Tool) -and $message.Contains($Path)) "Missing $Tool reports the exact expected path"
+}
 # No production keystore, private key, password or Android app is used by this suite.
 $root = Join-Path ([IO.Path]::GetTempPath()) ('family-signing-regression-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $root | Out-Null
@@ -34,6 +39,74 @@ try {
     Check ($received.ExitCode -eq 0 -and $arguments[0] -ceq '-J-Duser.language=en' -and $arguments[1] -ceq 'path with spaces') 'Native argv preserves dotted flag and spaced path'
     $stderr = Invoke-ReleaseTool (Join-Path $PSHOME $(if ($IsWindows) { 'pwsh.exe' } else { 'pwsh' })) @('-NoProfile', '-Command', '[Console]::Error.WriteLine("public warning"); exit 0')
     Check ($stderr.ExitCode -eq 0 -and $stderr.ErrorOutput.Contains('public warning')) 'Zero exit with native stderr warning accepted'
+
+    $discovery = Join-Path $root 'discovery-sdk'
+    foreach ($version in @('35.0.0', '36.0.0', '37.0.0', '38.0.0', '99.0.0-preview')) {
+        foreach ($relative in @('aapt2.exe', 'zipalign.exe', 'lib/apksigner.jar')) {
+            $file = Join-Path $discovery "build-tools/$version/$relative"
+            New-Item -ItemType Directory -Path (Split-Path $file) -Force | Out-Null
+            [IO.File]::WriteAllText($file, 'public discovery fixture, not executable')
+        }
+        $revision = if ($version -eq '37.0.0') { '37.0.0 rc1' } else { $version }
+        [IO.File]::WriteAllText((Join-Path $discovery "build-tools/$version/source.properties"), "Pkg.Revision=$revision")
+    }
+    Remove-Item -LiteralPath (Join-Path $discovery 'build-tools/38.0.0/aapt2.exe')
+    $resolved = Resolve-ReleaseBuildTools $discovery
+    Check ($resolved.Version -ceq '36.0.0') 'Highest complete stable version selected; preview and broken packages skipped'
+    $project = Join-Path $root 'discovery-project'
+    New-Item -ItemType Directory -Path $project | Out-Null
+    $gradle = Join-Path $project 'build.gradle.kts'
+    [IO.File]::WriteAllText($gradle, '// public project fixture')
+    $metadata = Join-Path $root 'build-tools.json'
+    @{ modules = @{ ':parent-app' = '35.0.0'; ':child-app' = '35.0.0' }; gradleFileHashes = @{ 'build.gradle.kts' = (Get-FileHash -LiteralPath $gradle).Hash.ToLowerInvariant() } } | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath $metadata
+    Check ((Resolve-ReleaseBuildTools $discovery '' $project $metadata).Version -ceq '35.0.0') 'Evaluated Android version precedes highest installed'
+    Check ((Resolve-ReleaseBuildTools $discovery '36.0.0' $project $metadata).Version -ceq '36.0.0') 'Explicit version precedes evaluated Android version'
+    Reject { Resolve-ReleaseBuildTools $discovery '99.0.0-preview' } 'Explicit preview version rejected'
+    Reject { Resolve-ReleaseBuildTools $discovery '37.0.0' } 'Preview metadata under stable directory rejected'
+    foreach ($relative in @('aapt2.exe', 'zipalign.exe', 'lib/apksigner.jar')) {
+        $file = Join-Path $discovery "build-tools/36.0.0/$relative"
+        Remove-Item -LiteralPath $file
+        RejectWithPath { Resolve-ReleaseBuildTools $discovery '36.0.0' } ([IO.Path]::GetFileName($file)) $file
+        [IO.File]::WriteAllText($file, 'public restored discovery fixture')
+    }
+    $javaMissing = Join-Path $root 'missing-java'
+    RejectWithPath { Resolve-ReleaseSigningEnvironment $discovery $javaMissing } 'java.exe' (Join-Path $javaMissing 'bin/java.exe')
+    New-Item -ItemType Directory -Path (Join-Path $javaMissing 'bin') | Out-Null
+    [IO.File]::WriteAllText((Join-Path $javaMissing 'bin/java.exe'), 'public fixture')
+    RejectWithPath { Resolve-ReleaseSigningEnvironment $discovery $javaMissing } 'keytool.exe' (Join-Path $javaMissing 'bin/keytool.exe')
+    $libJar = Join-Path $discovery 'build-tools/36.0.0/lib/apksigner.jar'
+    $rootJar = Join-Path $discovery 'build-tools/36.0.0/apksigner.jar'
+    Move-Item -LiteralPath $libJar -Destination $rootJar
+    [IO.File]::WriteAllText((Join-Path $discovery 'build-tools/36.0.0/apksigner.bat'), 'public wrapper fixture')
+    Check ((Resolve-ReleaseBuildTools $discovery '36.0.0').ApkSignerJar -ceq $rootJar) 'SDK wrapper root JAR layout resolved without cmd.exe'
+    Remove-Item -LiteralPath $rootJar
+    RejectWithPath { Resolve-ReleaseBuildTools $discovery '36.0.0' } 'apksigner.jar' $libJar
+    [IO.File]::WriteAllText($libJar, 'public restored discovery fixture')
+    [IO.File]::AppendAllText($gradle, ' changed')
+    Check ((Resolve-ReleaseBuildTools $discovery '' $project $metadata).Version -ceq '36.0.0') 'Stale evaluated metadata ignored'
+    [IO.File]::WriteAllText($gradle, 'buildToolsVersion = "35.0.0"')
+    Check ((Resolve-ReleaseBuildTools $discovery '' $project '').Version -ceq '35.0.0') 'Explicit Android build file version honored'
+    $archive = Join-Path $root 'public-readable-fixture.zip'
+    $zip = [IO.Compression.ZipFile]::Open($archive, [IO.Compression.ZipArchiveMode]::Create)
+    try {
+        foreach ($name in @('AndroidManifest.xml', 'classes.dex')) {
+            $stream = $zip.CreateEntry($name).Open()
+            try { $bytes = [Text.Encoding]::UTF8.GetBytes('public mock payload'); $stream.Write($bytes, 0, $bytes.Length) } finally { $stream.Dispose() }
+        }
+    } finally { $zip.Dispose() }
+    Assert-ReleaseArchiveReadable $archive -Apk
+    Check $true 'All APK-shaped ZIP entries decompress/read successfully'
+    $brokenArchive = Join-Path $root 'unreadable-fixture.zip'
+    [IO.File]::WriteAllText($brokenArchive, 'not a ZIP')
+    Reject { Assert-ReleaseArchiveReadable $brokenArchive -Apk } 'Unreadable APK archive rejected'
+    $unicodeFolder = Join-Path $root 'Vị trí'
+    New-Item -ItemType Directory -Path $unicodeFolder | Out-Null
+    $unicodeArchive = Join-Path $unicodeFolder 'public-fixture.zip'
+    Copy-Item -LiteralPath $archive -Destination $unicodeArchive
+    $nativeCopy = Get-ReleaseNativeApkInput $unicodeArchive
+    Check ($nativeCopy.Path -notmatch '[^\x00-\x7F]' -and (Get-FileHash -LiteralPath $nativeCopy.Path).Hash -ceq (Get-FileHash -LiteralPath $unicodeArchive).Hash) 'Unicode APK input copied to ASCII with byte-identical SHA-256'
+    Remove-ReleaseNativeApkInput $nativeCopy
+    Check (-not (Test-Path -LiteralPath $nativeCopy.Stage) -and (Test-Path -LiteralPath $unicodeArchive)) 'Native staging cleanup preserves original Unicode APK input'
 
     $document = Join-Path $root 'pin.md'
     [IO.File]::WriteAllText($document, 'Pinned signer SHA-256: `NOT_CREATED`' + "`nStatus: pending.")
@@ -76,7 +149,7 @@ function Invoke-ReleaseTool {
         $output = "package: name='com.family.$app' versionCode='34' versionName='2.3.0'"
     } elseif ($Executable.EndsWith('zipalign.exe')) {
         if ($Arguments[0] -eq '-c') {
-            if ($env:FAMILY_SIGNING_TEST_MODE -eq 'child-align' -and $apk.Contains('Child')) { $exitCode = 1 }
+            if ($env:FAMILY_SIGNING_TEST_MODE -eq 'child-align' -and $apk.Contains('Child') -and $apk.Contains('Installable')) { $exitCode = 1 }
         } else { Copy-Item -LiteralPath $Arguments[-2] -Destination $apk }
     } elseif ($Arguments -contains 'sign') {
         if ($env:FAMILY_SIGNING_TEST_MODE -eq 'child-sign' -and $apk.Contains('Child')) { $exitCode = 1 }
@@ -90,6 +163,7 @@ function Invoke-ReleaseTool {
     [pscustomobject]@{ ExitCode = $exitCode; Output = $output; ErrorOutput = '' }
 }
 function Get-ReleaseCertificateFingerprint { $script:ReleaseFingerprint }
+function Assert-ReleaseArchiveReadable { }
 '@
     [IO.File]::AppendAllText((Join-Path $copy 'scripts/ReleaseSigning.Common.ps1'), "`n" + $mock, [Text.UTF8Encoding]::new($false))
     [IO.File]::WriteAllText((Join-Path $copy 'docs/RELEASE_SIGNING_V230.md'), 'Pinned signer SHA-256: `' + $script:ReleaseFingerprint + '`')

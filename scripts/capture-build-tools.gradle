@@ -1,0 +1,24 @@
+import groovy.json.JsonOutput
+import java.security.MessageDigest
+
+gradle.projectsEvaluated {
+    rootProject.tasks.register('captureSigningBuildTools') {
+        doLast {
+            def modules = rootProject.allprojects.findAll { it.plugins.hasPlugin('com.android.application') }
+            def versions = modules.collectEntries { [(it.path): it.extensions.getByName('android').buildToolsVersion] }
+            def files = [rootProject.file('build.gradle.kts'), rootProject.file('settings.gradle.kts')] + modules.collect { it.buildFile }
+            def hashes = files.collectEntries { f ->
+                def relative = rootProject.projectDir.toPath().relativize(f.toPath()).toString().replace('\\', '/')
+                [(relative): MessageDigest.getInstance('SHA-256').digest(f.bytes).encodeHex().toString()]
+            }
+            def result = [modules: versions, gradleFileHashes: hashes]
+            def destination = rootProject.findProperty('familySigningMetadata')
+            if (destination) {
+                def output = new File(destination.toString())
+                output.parentFile.mkdirs()
+                output.setText(JsonOutput.prettyPrint(JsonOutput.toJson(result)) + '\n', 'UTF-8')
+            }
+            println('FAMILY_SIGNING_BUILD_TOOLS=' + JsonOutput.toJson(result))
+        }
+    }
+}
