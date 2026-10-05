@@ -10,7 +10,7 @@ def contains(path, values):
     s = path.read_text(encoding='utf-8-sig')
     for value in values: assert value in s, (str(path), value)
     return s
-version, code = ('2.3.0',34) if '--v2210' not in sys.argv and '--v2211' not in sys.argv else (('2.2.10',32) if '--v2210' in sys.argv else ('2.2.11',33))
+version, code = ('2.3.1',35) if '--v2210' not in sys.argv and '--v2211' not in sys.argv else (('2.2.10',32) if '--v2210' in sys.argv else ('2.2.11',33))
 for module, package in [('parent-app','com.family.parent'),('child-app','com.family.child')]:
     contains(root/'appsrc'/module/'build.gradle.kts', [f'applicationId = "{package}"',f'versionCode = {code}',f'versionName = "{version}"'])
     ET.parse(root/'appsrc'/module/'src/main/AndroidManifest.xml')
@@ -43,10 +43,10 @@ if code >= 33:
     contains(child/'LocationService.kt', ['generation != listenerGeneration','generation != routeGeneration','lastFreshFixAttemptElapsed','"fcmOriginalPriority"','"unusedAppRestricted"'])
     assert s.index('try { startAsForeground(); running = true }') < s.index('state.restore(engine)')
     contains(child/'TokenState.kt', ['fcm_token_generation_v2211','expected != null','current(context) != snapshot'])
-    contains(child/'WakeTokenSyncWorker.kt', ['runTransaction','currentDocument.updateTime','fcmTokenOwnerUid','https_readback_verified'])
+    contains(child/'WakeTokenSyncWorker.kt', ['EnrollmentClient.ensureRegistered','EnrollmentClient.signed','Source.SERVER','TokenState.rebase','backend_device_key_verified'])
     contains(parent/'ParentWakeBridge.kt', ['operation.result.get()','WAKE_WORKER_URL','identity_changed','currentDocument.updateTime','refreshRequestedBy'])
-    contains(parent/'MainActivity.kt', ['SurvivalHealth.fields','Firebase UID Máy Cha','Wake backend đã nhận yêu cầu','ParentWakeBridge.prepareCommand'])
-    contains(root/'cloudflare-wake/src/worker.js', ['verifier.verify','body_too_large','child-01'])
+    contains(parent/'MainActivity.kt', ['SurvivalHealth.fields','Đã đăng ký tự động','Wake backend đã nhận yêu cầu','ParentWakeBridge.prepareCommand'])
+    contains(root/'cloudflare-wake/src/worker.js', ['verifier.verify','body_too_large','FAMILY_REGISTRY'])
     contains(root/'cloudflare-wake/src/coordinator.js', ['storage.transaction','tx.setAlarm','attempts < 8','rate_limited','sentFingerprint'])
     conf=json.loads((root/'cloudflare-wake/wrangler.jsonc').read_text(encoding='utf-8'))
     assert conf['migrations'][0]['new_sqlite_classes']==['WakeCoordinator']
@@ -55,7 +55,7 @@ if code >= 33:
         assert '-----BEGIN PRIVATE KEY-----' not in content
     print('v2211 survival/secret boundary static checks passed; production NOT VERIFIED')
 
-if code == 34:
+if code >= 34:
     contains(child/'MainActivity.kt',['RequestMultiplePermissions','ACCESS_COARSE_LOCATION','ACCESS_BACKGROUND_LOCATION','first_setup_step_v230','onDismissRequest = onDismissContinuousRun'])
     contains(child/'LocationService.kt',['journalThread.looper','local.finishRefresh','ChildDeviceWriter.write(progress)','refreshPersistedFor','refreshUploadedFor'])
     contains(child/'ChildWakeMessagingService.kt',['it.acceptWake(requestId)','inbox_persist_failed'])
@@ -66,3 +66,19 @@ if code == 34:
     contains(root/'appsrc/parent-app/build.gradle.kts',['https://family-location-wake.huytoan0979928450.workers.dev','workerOrigin.rawQuery == null'])
     assert '4675c26756f' not in (root/'scripts/sign-release.ps1').read_text()
     print('v230 canonical source, first-use permission, durable inbox and guarded publication validation passed')
+
+if code == 35:
+    contains(root/'cloudflare-wake/src/enrollment.js',['registration_raced','nonce_reused','invalid_signature','slot_occupied','family_changed'])
+    contains(parent/'MainActivity.kt',['Đang chờ Máy Con kết nối','Máy Con · Đang kết nối','familyListener.remove()'])
+    for path in [root/'cloudflare-wake/src/worker.js',root/'cloudflare-wake/src/coordinator.js',root/'cloudflare-wake/render-rules.mjs']:
+        text=path.read_text(encoding='utf-8-sig')
+        assert 'env.PARENT_UID' not in text and 'env.CHILD_UID' not in text
+    print('v231 automatic enrollment, dynamic roles and device proof static checks passed')
+
+if code == 35:
+    contains(root/'cloudflare-wake/src/enrollment.js',['bootstrapAvailable','BootstrapConsumed','ClaimProofHash','bootstrap_consumed'])
+    contains(root/'appsrc/enrollment/src/main/java/com/family/enrollment/BootstrapPayload.kt',['needsBootstrap','purpose == "register"','bootstrap_not_provisioned'])
+    contains(root/'scripts/sign-release.ps1',['Assert-BootstrapApkPair'])
+    for role in ['parent','child']:
+        contains(root/f'appsrc/{role}-app/build.gradle.kts',[f'FAMILY_LOCATION_{role.upper()}_BOOTSTRAP','Bootstrap injection is forbidden in CI','BOOTSTRAP_TOKEN'])
+    print('v231 role bootstrap, hash-only atomic consumption and unprovisioned signing block checks passed')

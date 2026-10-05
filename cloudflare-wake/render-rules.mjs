@@ -2,25 +2,21 @@ import { writeFileSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 const args = process.argv.slice(2);
 const value = key => args[args.indexOf(key) + 1];
-const parent = value('--parent-uid'), child = value('--child-uid'), output = value('--output');
-if (!args.includes('--parent-uid') || !args.includes('--child-uid') || !args.includes('--output') || !/^[A-Za-z0-9_-]{1,128}$/.test(parent || '') || !/^[A-Za-z0-9_-]{1,128}$/.test(child || '') || parent === child || !output) throw new Error('Supply the two verified, distinct anonymous UIDs and an output path. No defaults or inferred identities.');
+const output = value('--output');
+if (!args.includes('--output') || !output || args.some(x => x === '--parent-uid' || x === '--child-uid')) throw new Error('Only --output is supported. Authorization uses the server-managed family mapping.');
 const rules = `rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    function parent() { return request.auth != null && request.auth.uid == ${JSON.stringify(parent)}; }
-    function child() { return request.auth != null && request.auth.uid == ${JSON.stringify(child)}; }
+    function family() { return get(/databases/$(database)/documents/families/family-01).data; }
+    function parent() { return request.auth != null && family().familyId == 'family-01' && family().childDeviceId == 'child-01' && family().get('parentUid','') != family().get('childUid','') && request.auth.uid == family().get('parentUid',''); }
+    function child() { return request.auth != null && family().familyId == 'family-01' && family().childDeviceId == 'child-01' && family().get('parentUid','') != family().get('childUid','') && request.auth.uid == family().get('childUid',''); }
     function commandKeys() { return ['refreshRequestedAt','refreshExpiresAt','refreshRequestedBy','locationReminderRequestedAt','locationReminderExpiresAt']; }
-    function serverKeys() { return ['wakeBackendFor','wakeBackendAt','wakeBackendResult','wakeDispatchFor','wakeDispatchAt','wakeDispatchResult','wakeDispatchMessageId','wakeLeaseOwner','wakeLeaseUntil','wakeLeaseFor','wakeDispatchToken','wakeDispatchTokenHash']; }
+    function serverKeys() { return ['parentUid','childUid','parentKey','childKey','familyId','childDeviceId','epoch','locked','wakeBackendFor','wakeBackendAt','wakeBackendResult','wakeDispatchFor','wakeDispatchAt','wakeDispatchResult','wakeDispatchMessageId','wakeLeaseOwner','wakeLeaseUntil','wakeLeaseFor','wakeDispatchToken','wakeDispatchTokenHash']; }
     function parentCommandValid() {
       return !request.resource.data.diff(resource.data).affectedKeys().hasAny(['refreshRequestedAt','refreshExpiresAt','refreshRequestedBy']) ||
         (request.resource.data.refreshRequestedBy == request.auth.uid && request.resource.data.refreshRequestedAt is int &&
          request.resource.data.refreshRequestedAt >= resource.data.get('refreshRequestedAt',0) &&
          request.resource.data.refreshExpiresAt == request.resource.data.refreshRequestedAt + 900000);
-    }
-    function childTokenValid() {
-      return !request.resource.data.diff(resource.data).affectedKeys().hasAny(['fcmToken','fcmTokenGeneration','fcmTokenOwnerUid']) ||
-        (request.resource.data.fcmTokenOwnerUid == request.auth.uid && request.resource.data.fcmToken is string &&
-         request.resource.data.fcmTokenGeneration is int && (request.resource.data.fcmTokenGeneration > resource.data.get('fcmTokenGeneration',0) || (request.resource.data.fcmTokenGeneration == resource.data.get('fcmTokenGeneration',0) && request.resource.data.fcmToken == resource.data.get('fcmToken','') && request.resource.data.fcmTokenOwnerUid == resource.data.get('fcmTokenOwnerUid',''))));
     }
     function stageValid(key) {
       return !request.resource.data.diff(resource.data).affectedKeys().hasAny([key]) ||
@@ -36,12 +32,16 @@ service cloud.firestore {
           !(resource.data.get('refreshCompletedFor',0) == resource.data.get('refreshRequestedAt',-1) || resource.data.get('refreshFailedFor',0) == resource.data.get('refreshRequestedAt',-1)) ||
           request.resource.data.refreshResult == resource.data.get('refreshResult',''));
     }
+    match /families/family-01 {
+      allow read: if parent() || child();
+      allow write: if false;
+    }
     match /devices/child-01 {
       allow read: if parent() || child();
-      allow create: if (parent() && request.resource.data.keys().hasOnly(commandKeys()) && request.resource.data.refreshRequestedBy == request.auth.uid && request.resource.data.refreshExpiresAt == request.resource.data.refreshRequestedAt + 900000) ||
-        (child() && !request.resource.data.keys().hasAny(commandKeys()) && !request.resource.data.keys().hasAny(serverKeys()) && (!request.resource.data.keys().hasAny(['fcmToken']) || request.resource.data.fcmTokenOwnerUid == request.auth.uid));
+      allow create: if (parent() && request.resource.data.keys().hasOnly(commandKeys()) && request.resource.data.refreshRequestedBy == request.auth.uid && request.resource.data.refreshRequestedAt is int && request.resource.data.refreshRequestedAt > 0 && request.resource.data.refreshExpiresAt == request.resource.data.refreshRequestedAt + 900000) ||
+        (child() && !request.resource.data.keys().hasAny(commandKeys()) && !request.resource.data.keys().hasAny(serverKeys()) && !request.resource.data.keys().hasAny(['fcmToken','fcmTokenGeneration','fcmTokenOwnerUid','fcmTokenUpdatedAt','fcmTokenVersion','wakeProtocolVersion']));
       allow update: if (parent() && request.resource.data.diff(resource.data).affectedKeys().hasOnly(commandKeys()) && parentCommandValid()) ||
-        (child() && !request.resource.data.diff(resource.data).affectedKeys().hasAny(commandKeys()) && !request.resource.data.diff(resource.data).affectedKeys().hasAny(serverKeys()) && childTokenValid() && childStateValid());
+        (child() && !request.resource.data.diff(resource.data).affectedKeys().hasAny(commandKeys()) && !request.resource.data.diff(resource.data).affectedKeys().hasAny(serverKeys()) && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['fcmToken','fcmTokenGeneration','fcmTokenOwnerUid','fcmTokenUpdatedAt','fcmTokenVersion','wakeProtocolVersion']) && childStateValid());
       allow delete: if false;
       match /events/{eventId} {
         allow read: if parent() || child();

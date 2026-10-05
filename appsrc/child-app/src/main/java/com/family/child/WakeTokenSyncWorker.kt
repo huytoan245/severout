@@ -1,6 +1,8 @@
 package com.family.child
 
 import android.content.Context
+import com.family.enrollment.EnrollmentClient
+import com.family.enrollment.EnrollmentFailure
 import androidx.work.*
 import com.google.android.gms.tasks.Tasks
 import com.google.firebase.auth.FirebaseAuth
@@ -21,44 +23,42 @@ class WakeTokenSyncWorker(appContext: Context, params: WorkerParameters) : Worke
         fun status(value: String) { prefs.edit().putString("fcm_token_worker_result_v229", value).apply() }
         prefs.edit().putLong("fcm_token_worker_run_at_v229", System.currentTimeMillis()).apply()
         try {
+            val uid = EnrollmentClient.ensureRegistered(app, BuildConfig.WAKE_WORKER_URL, "child", BuildConfig.BOOTSTRAP_TOKEN)
             val before = TokenState.current(app)
             val sdkToken = Tasks.await(FirebaseMessaging.getInstance().token, 20, TimeUnit.SECONDS)
             val current = TokenState.observe(app, sdkToken, before.generation)
             if (current.token.isBlank() || isStopped) return Result.retry()
             val auth = FirebaseAuth.getInstance()
-            if (auth.currentUser == null) Tasks.await(auth.signInAnonymously(), 20, TimeUnit.SECONDS)
-            val uid = auth.currentUser?.uid ?: return Result.retry()
-            IdentityDiagnostics.record(uid)
             fun stillCurrent() = !isStopped && auth.currentUser?.uid == uid && TokenState.current(app) == current
             if (!stillCurrent()) return Result.retry()
-            val fields = mapOf<String, Any>("fcmToken" to current.token, "fcmTokenGeneration" to current.generation,
-                "fcmTokenUpdatedAt" to current.generation, "fcmTokenOwnerUid" to uid,
-                "fcmWakeClientVersion" to BuildConfig.VERSION_NAME, "fcmTokenSyncProtocol" to "v230") + SetupDiagnostics.fields(app)
-            val db = FirebaseFirestore.getInstance()
-            val doc = db.collection("devices").document("child-01")
+            val doc = FirebaseFirestore.getInstance().collection("devices").document("child-01")
             try {
-                val written = Tasks.await(db.runTransaction { tx ->
-                    val remote = tx.get(doc)
-                    if (!stillCurrent()) false
-                    else if ((remote.getLong("fcmTokenGeneration") ?: 0L) > current.generation ||
-                        ((remote.getLong("fcmTokenGeneration") ?: 0L) == current.generation && (remote.getString("fcmToken") != current.token || remote.getString("fcmTokenOwnerUid") != uid))) {
-                        TokenState.rebase(app, current, remote.getLong("fcmTokenGeneration") ?: 0L); false
-                    }
-                    else { tx.set(doc, fields, SetOptions.merge()); true }
-                }, 20, TimeUnit.SECONDS)
-                if (written && stillCurrent()) {
-                    val remote = Tasks.await(doc.get(Source.SERVER), 20, TimeUnit.SECONDS)
-                    if (remote.getString("fcmToken") == current.token && remote.getLong("fcmTokenGeneration") == current.generation && remote.getString("fcmTokenOwnerUid") == uid && stillCurrent() && TokenState.confirm(app, current)) {
-                        status("firestore_verified"); return Result.success()
-                    }
+                val remote = Tasks.await(doc.get(Source.SERVER), 15, TimeUnit.SECONDS)
+                val generation = remote.getLong("fcmTokenGeneration") ?: 0L
+                if (generation > current.generation || (generation == current.generation && (remote.getString("fcmToken") != current.token || remote.getString("fcmTokenOwnerUid") != uid))) {
+                    TokenState.rebase(app, current, generation); return Result.retry()
                 }
-            } catch (e: Exception) { status("firestore:${e.javaClass.simpleName}") }
+            } catch (_: Exception) { /* Backend CAS also checks the current revision. */ }
             if (!stillCurrent()) return Result.retry()
-            val idToken = Tasks.await(auth.currentUser!!.getIdToken(false), 15, TimeUnit.SECONDS).token ?: return Result.retry()
-            if (TokenCasTransport.upload(app, current, uid, fields, idToken, ::stillCurrent) && stillCurrent() && TokenState.confirm(app, current)) {
-                status("https_readback_verified"); return Result.success()
+            val confirmed = try {
+                EnrollmentClient.signed(app, BuildConfig.WAKE_WORKER_URL, "child", "token", JSONObject()
+                    .put("familyId", "family-01").put("deviceId", "child-01")
+                    .put("token", current.token).put("generation", current.generation))
+            } catch (e: EnrollmentFailure) {
+                if (e.requiredGeneration > 0L) TokenState.rebase(app, current, e.requiredGeneration - 1L)
+                status(e.code)
+                return if (e.retryable) Result.retry() else Result.failure()
+            }
+            if (confirmed.optBoolean("confirmed") && confirmed.optLong("generation") == current.generation && stillCurrent() && TokenState.confirm(app, current)) {
+                // Token ownership and revision are now server-owned. This write
+                // contains only ordinary Child diagnostics.
+                doc.set(SetupDiagnostics.fields(app) + mapOf("fcmWakeClientVersion" to BuildConfig.VERSION_NAME,
+                    "fcmTokenSyncProtocol" to "v231-device-key"), SetOptions.merge())
+                status("backend_device_key_verified"); return Result.success()
             }
             status("server_unconfirmed"); return Result.retry()
+        } catch (e: EnrollmentFailure) {
+            status(e.code); return if (e.retryable) Result.retry() else Result.failure()
         } catch (e: Exception) { status("retry:${e.javaClass.simpleName}"); return Result.retry() }
     }
     companion object {

@@ -37,6 +37,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.google.firebase.auth.FirebaseAuth
+import com.family.enrollment.EnrollmentClient
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.MetadataChanges
 import com.google.firebase.firestore.SetOptions
@@ -117,6 +118,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         restoredState = savedInstanceState
         MapLibre.getInstance(this)
+        ParentEnrollmentWorker.schedule(this)
         if (Build.VERSION.SDK_INT >= 33 && ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
             notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
@@ -134,16 +136,15 @@ class MainActivity : ComponentActivity() {
 
 @Composable
 fun ParentApp(savedState: Bundle?, onMapViewCreated: (MapView) -> Unit) {
-    var authReady by remember { mutableStateOf(FirebaseAuth.getInstance().currentUser != null) }
-    var authError by remember { mutableStateOf<String?>(null) }
+    val context = LocalContext.current
+    var authReady by remember { mutableStateOf(EnrollmentClient.registered(context, "parent")) }
+    var recoveryRequired by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) {
-        if (authReady) {
-            FirebaseAuth.getInstance().currentUser?.uid?.let { android.util.Log.i("FamilyIdentity", "role=parent uid=$it") }
-            FirebaseFirestore.getInstance().enableNetwork()
-        } else {
-            FirebaseAuth.getInstance().signInAnonymously()
-                .addOnSuccessListener { result -> android.util.Log.i("FamilyIdentity", "role=parent uid=${result.user?.uid}"); authReady = true; FirebaseFirestore.getInstance().enableNetwork() }
-                .addOnFailureListener { authError = it.message ?: it.javaClass.simpleName }
+        ParentEnrollmentWorker.schedule(context)
+        while (true) {
+            authReady = EnrollmentClient.registered(context, "parent")
+            recoveryRequired = context.getSharedPreferences("wake_diag", Context.MODE_PRIVATE).getString("enrollment", "") in setOf("slot_occupied", "role_conflict", "retired_identity", "role_not_registered")
+            delay(1000L)
         }
     }
 
@@ -156,10 +157,9 @@ fun ParentApp(savedState: Bundle?, onMapViewCreated: (MapView) -> Unit) {
     )
     MaterialTheme(colorScheme = scheme) {
         when {
-            authError != null -> Box(Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
-                Text("Không đăng nhập được Firebase: $authError", color = MaterialTheme.colorScheme.error)
+            !authReady -> Box(Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
+                Text(if (recoveryRequired) "Cần khôi phục kết nối gia đình." else "Đang chờ Máy Con kết nối", color = MaterialTheme.colorScheme.onSurface)
             }
-            !authReady -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
             else -> ParentDashboard(savedState, onMapViewCreated)
         }
     }
@@ -169,6 +169,7 @@ fun ParentApp(savedState: Bundle?, onMapViewCreated: (MapView) -> Unit) {
 fun ParentDashboard(savedState: Bundle?, onMapViewCreated: (MapView) -> Unit) {
     val context = LocalContext.current
     val db = remember { FirebaseFirestore.getInstance() }
+    var childRegistered by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     var selectedTab by remember { mutableStateOf(ParentTab.HOME) }
     var tick by remember { mutableLongStateOf(System.currentTimeMillis()) }
@@ -350,6 +351,9 @@ fun ParentDashboard(savedState: Bundle?, onMapViewCreated: (MapView) -> Unit) {
     }
 
     DisposableEffect(Unit) {
+        val familyListener = db.collection("families").document("family-01").addSnapshotListener { family, _ ->
+            childRegistered = !family?.getString("childUid").isNullOrBlank()
+        }
         val deviceListener = db.collection("devices").document(CHILD_DOC)
             .addSnapshotListener(MetadataChanges.INCLUDE) { d, error ->
                 if (error != null) {
@@ -450,6 +454,7 @@ fun ParentDashboard(savedState: Bundle?, onMapViewCreated: (MapView) -> Unit) {
         try { cm.registerDefaultNetworkCallback(callback); registered = true } catch (_: Exception) {}
 
         onDispose {
+            familyListener.remove()
             deviceListener.remove()
             eventListener.remove()
             if (registered) try { cm.unregisterNetworkCallback(callback) } catch (_: Exception) {}
@@ -563,7 +568,7 @@ fun ParentDashboard(savedState: Bundle?, onMapViewCreated: (MapView) -> Unit) {
     val lastServiceEvidenceAt = maxOf(lastLocalServiceHeartbeatAt, heartbeatAt, diagnosticAt)
     val serviceLikelyStopped = networkAssessment.level == ConnectionLevel.LOST &&
         lastServiceEvidenceAt > 0L && now - lastServiceEvidenceAt >= SERVICE_SUSPECT_STALE_MS
-    val assessment = if (serviceLikelyStopped) {
+    val assessedConnection = if (serviceLikelyStopped) {
         networkAssessment.copy(
             title = "Dịch vụ Máy Con có thể đã dừng",
             detail = "Không nhận được heartbeat của ứng dụng trong ${ageAt(now, lastServiceEvidenceAt)}. Có thể Samsung đã giới hạn hoặc cho ứng dụng nghỉ sâu; trạng thái GPS/mạng bên dưới chỉ là dữ liệu cuối cùng đã biết."
@@ -575,6 +580,11 @@ fun ParentDashboard(savedState: Bundle?, onMapViewCreated: (MapView) -> Unit) {
             detail = "Máy Con báo Android đang hạn chế hoạt động nền. Hãy đặt Pin = Không hạn chế và trên Samsung thêm app vào Không bao giờ tự nghỉ."
         )
     } else networkAssessment
+    val assessment = when {
+        !childRegistered -> ConnectionAssessment(ConnectionLevel.UNKNOWN, "Đang chờ Máy Con kết nối", "Máy Con sẽ tự kết nối sau khi mở ứng dụng.", 0L)
+        assessedConnection.level == ConnectionLevel.UNKNOWN || assessedConnection.level == ConnectionLevel.CONNECTED -> assessedConnection.copy(title = "Máy Con · Đang kết nối")
+        else -> assessedConnection
+    }
     val locationStateFresh = diagnosticAt > 0L && now - diagnosticAt <= DIAGNOSTIC_FRESH_MS
     val confirmedLocationOff = locationStateFresh && locationEnabled == false
     val locationOffDurationMs = if (confirmedLocationOff && locationOffSince > 0L) (now - locationOffSince).coerceAtLeast(0L) else 0L
@@ -642,10 +652,10 @@ fun ParentDashboard(savedState: Bundle?, onMapViewCreated: (MapView) -> Unit) {
                             if (refreshRequestId == requestAt) {
                                 commandConfirmedFor = requestAt
                                 if (wakeProgressRank < 4) { wakeProgressRank = 4; refreshText = "Yêu cầu đã gửi · chờ wake backend..." }
-                                ParentWakeBridge.dispatch(requestAt) { result ->
+                                ParentWakeBridge.dispatch(context, requestAt) { result ->
                                     if (refreshRequestId == requestAt && wakeProgressRank < 6) {
                                         if (result.accepted && wakeProgressRank < 5) { wakeProgressRank = 5; refreshText = "Wake backend đã nhận yêu cầu..." }
-                                        else if (!result.accepted) refreshText = if (result.status == "not_configured") "Chưa cấu hình Cloudflare Worker · vẫn chờ kênh nền..." else "Wake backend: ${result.status} · vẫn chờ Máy Con..."
+                                        else if (!result.accepted) refreshText = if (result.status == "not_configured") "Đang thử kết nối lại · vẫn chờ Máy Con..." else "Đang thử kết nối lại · vẫn chờ Máy Con..."
                                     }
                                 }
                             }
@@ -664,7 +674,7 @@ fun ParentDashboard(savedState: Bundle?, onMapViewCreated: (MapView) -> Unit) {
                                         lastHttpsSuccessAt = System.currentTimeMillis()
                                         httpsFallbackActive = true
                                         if (wakeProgressRank < 4) { wakeProgressRank = 4; refreshText = "Yêu cầu đã gửi qua HTTPS · chờ wake backend..." }
-                                        ParentWakeBridge.dispatch(requestAt) { result ->
+                                        ParentWakeBridge.dispatch(context, requestAt) { result ->
                                             if (refreshRequestId == requestAt && wakeProgressRank < 5 && result.accepted) { wakeProgressRank = 5; refreshText = "Wake backend đã nhận yêu cầu..." }
                                         }
                                     } else if (commandConfirmedFor != requestAt) {
@@ -1176,7 +1186,7 @@ private fun HealthScreen(
 
         item {
             HealthCard("Survival / Android background") {
-                HealthRow("Firebase UID Máy Cha", FirebaseAuth.getInstance().currentUser?.uid ?: "Chưa xác định")
+                HealthRow("Danh tính Máy Cha", if (EnrollmentClient.registered(LocalContext.current, "parent")) "Đã đăng ký tự động" else "Đang kết nối")
                 HealthRow("Cloudflare Worker", ParentWakeBridge.endpoint() ?: "Chưa cấu hình")
                 SurvivalHealth.fields.forEach { name -> HealthRow(name, survivalDiagnostics[name] ?: "Chưa xác định") }
                 Text("unusedAppRestricted cho biết tính năng tự thu hồi quyền/hibernation được bật, không chứng minh app hiện đang ngủ. Samsung Sleeping/Deep Sleeping: không có API công khai để xác nhận.", style = MaterialTheme.typography.bodySmall)

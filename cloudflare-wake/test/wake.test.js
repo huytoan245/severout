@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { WakeCoordinator, validateRequest, TTL } from '../src/coordinator.js';
-import { FirebaseVerifier, b64, GoogleApi, ApiError } from '../src/google.js';
+import { FirebaseVerifier, b64, GoogleApi, ApiError, boundedFetch } from '../src/google.js';
 import worker from '../src/worker.js';
 
 const NOW = 1800000000000;
@@ -20,15 +20,16 @@ function harness() {
   const ctx = { storage, waitUntil: p => pending.push(p) };
   const api = {
     d: { refreshRequestedAt: NOW, refreshExpiresAt: NOW + TTL, refreshRequestedBy: 'parent', fcmTokenOwnerUid: 'child', fcmToken: 'token-A' }, sends: [], patches: [],
+    async readFamily() { return {parentUid:'parent',childUid:'child',epoch:1,updateTime:'one'}; },
     async readDevice() { return structuredClone(this.d); },
     async patchIfCurrent(id, values) { if (this.d.refreshRequestedAt !== id) return false; this.patches.push(values); Object.assign(this.d, values); return true; },
     async send(token, id, ttl) { this.sends.push({ token, id, ttl }); return 'projects/family-location-884e5/messages/m'; }
   };
-  const create = () => new WakeCoordinator(ctx, { PARENT_UID: 'parent', CHILD_UID: 'child' }, api, () => now);
+  const create = () => new WakeCoordinator(ctx, {}, api, () => now);
   let coordinator = create();
   return { storage, api, get c() { return coordinator; }, restart() { coordinator = create(); }, advance(ms) { now += ms; },
     async drain() { while (pending.length) await Promise.all(pending.splice(0)); },
-    async post(id = NOW) { return coordinator.fetch(new Request('https://internal/v1/wake', { method: 'POST', body: JSON.stringify(body(id)) })); },
+    async post(id = NOW) { return coordinator.fetch(new Request('https://internal/v1/wake', { method: 'POST', body: JSON.stringify({command:body(id),binding:{parentUid:'parent',epoch:1}}) })); },
     async alarm() { now = storage.alarmAt; await coordinator.alarm(); }
   };
 }
@@ -107,6 +108,21 @@ async function jwt(overrides = {}, header = {}) {
 }
 function verifier() { return new FirebaseVerifier(async () => Response.json({ keys: [jwk] }, { headers: { 'cache-control': 'max-age=3600' } })); }
 test('cryptographically valid Firebase token and exact Parent UID accepted', async () => { assert.equal(await verifier().verify(await jwt(), 'parent', NOW), 'parent'); });
+test('JWT subject is derived without a configured UID, but remains cryptographically verified', async () => {
+  assert.equal(await verifier().verify(await jwt({sub:'dynamic-anonymous-uid'}), undefined, NOW), 'dynamic-anonymous-uid');
+  await assert.rejects(async()=>verifier().verify(await jwt({sub:42}), undefined, NOW), e=>e.status===401);
+});
+test('Google HTTP transport rejects redirects and uses workerd-supported manual mode', async () => {
+  let calls=0;
+  await assert.rejects(()=>boundedFetch('https://google.example', {}, async (_url,options)=>{calls++;assert.equal(options.redirect,'manual');return new Response('',{status:302,headers:{Location:'https://attacker.example'}});}),e=>e.code==='upstream_unavailable');
+  assert.equal(calls,1);
+});
+test('an epoch change stops a pending wake and cannot reuse old Parent authority', async () => {
+  const h=harness();delete h.api.d.fcmToken;await h.post();await h.drain();
+  h.api.readFamily=async()=>({parentUid:'replacement',childUid:'child',epoch:2,updateTime:'two'});
+  await h.alarm();assert.equal(h.api.sends.length,0);assert.equal((await h.storage.get('request')).error,'family_changed');
+  assert.equal((await h.post()).status,403);
+});
 test('forged signature, wrong UID/project/issuer/expiry/alg/key rejected', async () => {
   const values = [await jwt({ sub: 'child' }), await jwt({ aud: 'other' }), await jwt({ iss: 'https://evil' }), await jwt({ exp: NOW / 1000 }), await jwt({ iat: NOW / 1000 + 60 }), await jwt({ auth_time: NOW / 1000 + 60 }), await jwt({ exp: NOW / 1000 - 100 }), await jwt({ exp: NOW / 1000 + 7200 }), await jwt({ auth_time: NOW / 1000 + 25, iat: NOW / 1000 - 100 }), await jwt({}, { alg: 'HS256' }), await jwt({}, { kid: 'unknown' })];
   const valid = await jwt(); values.push(valid.slice(0, -8) + 'AAAAAAA');
@@ -119,12 +135,12 @@ test('public keys cached; keys outage is a retryable error, not valid auth', asy
 });
 const awaitToken = await jwt();
 test('public health reveals no secrets; wake fails closed without config', async () => {
-  const r = await worker.fetch(new Request('https://x/health'), {}); assert.deepEqual(await r.json(), { service: 'family-location-wake', version: '2.3.0', configured: false });
+  const r = await worker.fetch(new Request('https://x/health'), {}); assert.deepEqual(await r.json(), { service: 'family-location-wake', version: '2.3.1', configured: false });
   const denied = await worker.fetch(new Request('https://x/v1/wake', { method: 'POST', body: '{}' }), {}); assert.equal(denied.status, 503);
 });
-test('configured endpoint rejects missing auth, arbitrary token and oversize body', async () => {
-  const env = { FIREBASE_PROJECT_ID: 'family-location-884e5', PARENT_UID: 'parent', CHILD_UID: 'child', GOOGLE_SERVICE_ACCOUNT_JSON: '{}' };
-  for (const [b, status] of [[body(Date.now()), 401], [{ ...body(Date.now()), token: 't' }, 400], ['x'.repeat(1025), 413]]) {
+test('configured endpoints reject unauthenticated payloads before any storage access', async () => {
+  const env = { FIREBASE_PROJECT_ID: 'family-location-884e5', GOOGLE_SERVICE_ACCOUNT_JSON: '{}' };
+  for (const [b, status] of [[body(Date.now()), 401], [{ ...body(Date.now()), token: 't' }, 401], ['x'.repeat(8193), 401]]) {
     const r = await worker.fetch(new Request('https://x/v1/wake', { method: 'POST', headers: { 'content-type': 'application/json' }, body: typeof b === 'string' ? b : JSON.stringify(b) }), env); assert.equal(r.status, status);
   }
 });

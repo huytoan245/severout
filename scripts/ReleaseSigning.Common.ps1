@@ -216,9 +216,10 @@ function Remove-ReleaseNativeApkInput {
 }
 
 function Assert-ReleaseApkIdentity {
-    param([string]$Badging, [string]$Package)
+    param([string]$Badging, [string]$Package, [string]$Version = '2.3.0', [int]$VersionCode = 34)
+    if (($Version -ceq '2.3.0' -and $VersionCode -ne 34) -or ($Version -ceq '2.3.1' -and $VersionCode -ne 35) -or $Version -cnotin @('2.3.0','2.3.1')) { throw 'Unsupported release version/code pair.' }
     $match = [regex]::Match($Badging, "(?m)^package: name='([^']+)' versionCode='([^']+)' versionName='([^']+)'")
-    if (-not $match.Success -or $match.Groups[1].Value -cne $Package -or $match.Groups[2].Value -cne '34' -or $match.Groups[3].Value -cne '2.3.0') { throw 'APK package/version gate failed.' }
+    if (-not $match.Success -or $match.Groups[1].Value -cne $Package -or $match.Groups[2].Value -cne [string]$VersionCode -or $match.Groups[3].Value -cne $Version) { throw 'APK package/version gate failed.' }
 }
 
 function Assert-ReleaseApkCertificate {
@@ -228,19 +229,19 @@ function Assert-ReleaseApkCertificate {
 }
 
 function Test-ReleaseApk {
-    param([string]$Apk, [string]$Package, [string]$Java, [string]$BuildTools, [string]$Expected, [string]$ApkSignerJar = (Join-Path $BuildTools 'lib/apksigner.jar'))
+    param([string]$Apk, [string]$Package, [string]$Java, [string]$BuildTools, [string]$Expected, [string]$ApkSignerJar = (Join-Path $BuildTools 'lib/apksigner.jar'), [string]$Version = '2.3.0', [int]$VersionCode = 34)
     Assert-ReleaseArchiveReadable $Apk -Apk
     $inputFile = Get-ReleaseNativeApkInput $Apk
     try {
     $nativeApk = $inputFile.Path
     $identity = Invoke-ReleaseTool (Join-Path $BuildTools 'aapt2.exe') @('dump', 'badging', $nativeApk)
     if ($identity.ExitCode -ne 0) { throw 'APK badging failed.' }
-    Assert-ReleaseApkIdentity $identity.Output $Package
+    Assert-ReleaseApkIdentity $identity.Output $Package $Version $VersionCode
     $verify = Invoke-ReleaseTool $Java @('-jar', $ApkSignerJar, 'verify', '--verbose', '--print-certs', $nativeApk)
     if ($verify.ExitCode -ne 0) { throw 'apksigner verify failed; output not promoted.' }
     Assert-ReleaseApkCertificate $verify.Output $Expected
     $alignment = Invoke-ReleaseTool (Join-Path $BuildTools 'zipalign.exe') @('-c', '-P', '16', '4', $nativeApk)
     if ($alignment.ExitCode -ne 0) { throw '16KiB zipalign verification failed; output not promoted.' }
-    [pscustomobject]@{ Package = $Package; VersionName = '2.3.0'; VersionCode = 34; CertificateSha256 = $Expected; Signature = 'PASS'; Zipalign = 'PASS'; Integrity = 'PASS (all ZIP entries readable and APK signature verified)'; Sha256 = (Get-FileHash -LiteralPath $Apk -Algorithm SHA256).Hash.ToLowerInvariant(); Verification = $verify.Output }
+    [pscustomobject]@{ Package = $Package; VersionName = $Version; VersionCode = $VersionCode; CertificateSha256 = $Expected; Signature = 'PASS'; Zipalign = 'PASS'; Integrity = 'PASS (all ZIP entries readable and APK signature verified)'; Sha256 = (Get-FileHash -LiteralPath $Apk -Algorithm SHA256).Hash.ToLowerInvariant(); Verification = $verify.Output }
     } finally { Remove-ReleaseNativeApkInput $inputFile }
 }

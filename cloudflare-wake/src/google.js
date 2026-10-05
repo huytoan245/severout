@@ -7,7 +7,7 @@ export class ApiError extends Error {
 export const b64 = bytes => btoa(String.fromCharCode(...new Uint8Array(bytes))).replace(/=/g, '').replace(/\+/g, '-').replace(/\//g, '_');
 export const unb64 = s => Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - s.length % 4) % 4)), c => c.charCodeAt(0));
 export async function boundedFetch(url, options = {}, fetcher = fetch) {
-  try { return await fetcher(url, { ...options, redirect: 'error', signal: AbortSignal.timeout(8000) }); }
+  try { const response = await fetcher(url, { ...options, redirect: 'manual', signal: AbortSignal.timeout(8000) }); if (response.status >= 300 && response.status < 400) throw new Error('redirect_rejected'); return response; }
   catch { throw new ApiError('upstream_unavailable', 503, true); }
 }
 export class FirebaseVerifier {
@@ -25,13 +25,13 @@ export class FirebaseVerifier {
     await this.flight;
   }
   async verify(token, uid, now = Date.now()) {
-    if (!uid || typeof token !== 'string' || token.length > 8192) throw new ApiError('unauthorized', 401);
+    if (typeof token !== 'string' || token.length > 8192) throw new ApiError('unauthorized', 401);
     try {
       const parts = token.split('.'); if (parts.length !== 3) throw new Error();
       const h = JSON.parse(new TextDecoder().decode(unb64(parts[0])));
       const p = JSON.parse(new TextDecoder().decode(unb64(parts[1])));
       const sec = now / 1000;
-      if (h.alg !== 'RS256' || typeof h.kid !== 'string' || h.crit || p.aud !== PROJECT || p.iss !== `https://securetoken.google.com/${PROJECT}` || p.sub !== uid || !p.sub || p.sub.length > 128 || !Number.isFinite(p.exp) || p.exp <= sec || !Number.isFinite(p.iat) || p.iat > sec + 30 || !Number.isFinite(p.auth_time) || p.auth_time > sec + 30 || p.auth_time < 0 || p.iat < 0 || p.exp <= p.iat || p.exp - p.iat > 3660 || p.auth_time > p.iat + 30 || (p.nbf != null && p.nbf > sec + 30)) throw new Error();
+      if (h.alg !== 'RS256' || typeof h.kid !== 'string' || h.crit || p.aud !== PROJECT || p.iss !== `https://securetoken.google.com/${PROJECT}` || (uid != null && p.sub !== uid) || typeof p.sub !== 'string' || !p.sub || p.sub.length > 128 || !Number.isFinite(p.exp) || p.exp <= sec || !Number.isFinite(p.iat) || p.iat > sec + 30 || !Number.isFinite(p.auth_time) || p.auth_time > sec + 30 || p.auth_time < 0 || p.iat < 0 || p.exp <= p.iat || p.exp - p.iat > 3660 || p.auth_time > p.iat + 30 || (p.nbf != null && p.nbf > sec + 30)) throw new Error();
       if (!this.keys || now >= this.until) await this.load(now);
       let jwk = this.keys.find(k => k.kid === h.kid && k.kty === 'RSA');
       if (!jwk && now - this.lastFetch >= 60000) { await this.load(now); jwk = this.keys.find(k => k.kid === h.kid && k.kty === 'RSA'); }
@@ -70,6 +70,53 @@ export class GoogleApi {
     return r;
   }
   docUrl() { return `https://firestore.googleapis.com/v1/projects/${PROJECT}/databases/(default)/documents/devices/child-01`; }
+  familyUrl() { return this.docUrl().replace('devices/child-01', 'families/family-01'); }
+  async readDocument(url) {
+    const r = await this.call(url);
+    if (r.status === 404) return {};
+    if (!r.ok) throw new ApiError('state_read_failed', 503, true);
+    const d = await r.json(); const out = {};
+    for (const [k, v] of Object.entries(d.fields || {})) out[k] = 'integerValue' in v ? Number(v.integerValue) : 'booleanValue' in v ? v.booleanValue : v.stringValue;
+    return { ...out, updateTime: d.updateTime };
+  }
+  async readFamily() { return this.readDocument(this.familyUrl()); }
+  fields(values) {
+    return Object.fromEntries(Object.entries(values).filter(([k]) => k !== 'updateTime').map(([k, v]) => [k, typeof v === 'number' ? { integerValue: String(v) } : typeof v === 'boolean' ? { booleanValue: v } : { stringValue: String(v) }]));
+  }
+  async conflict(response) {
+    if ([409, 412].includes(response.status)) return true;
+    if (response.status !== 400) return false;
+    try { return ['FAILED_PRECONDITION', 'ABORTED'].includes((await response.clone().json()).error?.status); } catch { return false; }
+  }
+  async writeFamily(previous, values) {
+    // Use the documented Write precondition in an atomic commit, rather than
+    // relying on PATCH query parsing for the authoritative enrollment CAS.
+    const writes = [{ update: { name: this.familyUrl().split('/v1/')[1], fields: this.fields(values) }, currentDocument: previous.updateTime ? { updateTime: previous.updateTime } : { exists: false } }];
+    const r = await this.call(this.docUrl().replace('/documents/devices/child-01', '/documents:commit'), { method: 'POST', body: JSON.stringify({ writes }) });
+    if (await this.conflict(r)) return false;
+    if (!r.ok) throw new ApiError('registration_write_failed', 503, true);
+    return true;
+  }
+  async updateChildToken(family, uid, payload, now) {
+    if (!family.updateTime || uid !== family.childUid) throw new ApiError('role_not_registered', 403);
+    const d = await this.readDocument(this.docUrl());
+    const old = d.fcmTokenGeneration || 0;
+    if (payload.generation < old || (payload.generation === old && (d.fcmToken !== payload.token || d.fcmTokenOwnerUid !== uid))) {
+      const e = new ApiError('token_revision_conflict', 409); e.requiredGeneration = old + 1; throw e;
+    }
+    if (payload.generation === old) return { generation: old, confirmed: true };
+    const values = { fcmToken: payload.token, fcmTokenOwnerUid: uid, fcmTokenGeneration: payload.generation, fcmTokenUpdatedAt: now, fcmTokenVersion: '2.3.1', wakeProtocolVersion: 'v231-device-key' };
+    const writes = [
+      // A conditional no-op epoch write makes membership and token CAS one
+      // atomic commit using only documented Firestore REST Write operations.
+      { update: { name: this.familyUrl().split('/v1/')[1], fields: this.fields({ epoch: family.epoch }) }, updateMask: { fieldPaths: ['epoch'] }, currentDocument: { updateTime: family.updateTime } },
+      { update: { name: this.docUrl().split('/v1/')[1], fields: this.fields(values) }, updateMask: { fieldPaths: Object.keys(values) }, currentDocument: d.updateTime ? { updateTime: d.updateTime } : { exists: false } }
+    ];
+    const r = await this.call(this.docUrl().replace('/documents/devices/child-01', '/documents:commit'), { method: 'POST', body: JSON.stringify({ writes }) });
+    if (await this.conflict(r)) throw new ApiError('state_changed', 409, true);
+    if (!r.ok) throw new ApiError('token_write_failed', 503, true);
+    return { generation: payload.generation, confirmed: true };
+  }
   async readDevice() {
     const r = await this.call(this.docUrl());
     if (!r.ok) throw new ApiError('device_read_failed', 503, r.status >= 500 || r.status === 429 || r.status === 401);
