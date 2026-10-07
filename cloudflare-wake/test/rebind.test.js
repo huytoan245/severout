@@ -7,6 +7,10 @@ const payload=()=>({familyId:'family-01',deviceId:'child-01',version:'2.3.2'});
 const rebind=async(h,app)=>h.call(app,app.role==='parent'?'rebindParent':'rebindChild',await h.proof(app,'rebind',payload()));
 test('rebind cannot reuse current or permanently retired installation key under a fresh UID',async()=>{
   const h=harness(),old=await installation('old','parent');await h.enroll(old);
+  const alphabet='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+  const alias=old.publicKey.slice(0,-1)+alphabet[alphabet.indexOf(old.publicKey.at(-1))^1];
+  assert.deepEqual(Buffer.from(alias,'base64url'),Buffer.from(old.publicKey,'base64url'));
+  assert.equal((await rebind(h,{...old,uid:'fresh-auth-key-alias',publicKey:alias})).body.error,'invalid_signature');
   assert.equal((await rebind(h,{...old,uid:'fresh-auth-retained-key'})).body.error,'fresh_key_required');
   const next=await installation('new','parent',old.material);assert.equal((await rebind(h,next)).status,200);
   assert.equal((await rebind(h,{...old,uid:'newer-auth-old-key'})).body.error,'fresh_key_required');

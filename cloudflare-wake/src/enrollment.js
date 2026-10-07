@@ -82,7 +82,10 @@ export class FamilyRegistry {
         let payload;
         try {
           payload = JSON.parse(body.payload);
-          const publicKey = await crypto.subtle.importKey('spki', unb64(body.publicKey), { name: 'ECDSA', namedCurve: 'P-256' }, false, ['verify']);
+          const publicKey = await crypto.subtle.importKey('spki', unb64(body.publicKey), { name: 'ECDSA', namedCurve: 'P-256' }, true, ['verify']);
+          // One canonical SPKI representation per key: alternate base64/DER
+          // encodings cannot bypass permanent key retirement.
+          if (b64(await crypto.subtle.exportKey('spki', publicKey)) !== body.publicKey) throw new Error();
           if (!await crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, publicKey, unb64(body.signature), utf8.encode(proofMessage(uid, role, body.nonce, purpose, await digest(body.payload))))) throw new Error();
         } catch { throw new ApiError('invalid_signature', 403); }
         const f = await this.family();
