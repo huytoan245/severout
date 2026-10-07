@@ -2,7 +2,7 @@ import { ApiError, FirebaseVerifier } from './google.js';
 export { WakeCoordinator } from './coordinator.js';
 export { FamilyRegistry } from './enrollment.js';
 const verifier = new FirebaseVerifier();
-const routes = { '/v1/challenge': 'challenge', '/v1/register/parent': 'registerParent', '/v1/register/child': 'registerChild', '/v1/token': 'token', '/v1/wake': 'wake', '/v1/family': 'state', '/v1/diagnostics': 'diagnostics' };
+const routes = { '/v1/challenge': 'challenge', '/v1/register/parent': 'registerParent', '/v1/register/child': 'registerChild', '/v1/rebind/parent':'rebindParent', '/v1/rebind/child':'rebindChild', '/v1/token': 'token', '/v1/wake': 'wake', '/v1/family': 'state', '/v1/diagnostics': 'diagnostics' };
 export async function readBody(request) {
   if (!request.headers.get('content-type')?.startsWith('application/json')) throw new ApiError('invalid_content_type', 415);
   if (Number(request.headers.get('content-length')) > 8192) throw new ApiError('body_too_large', 413);
@@ -15,7 +15,7 @@ export async function readBody(request) {
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
-    if (url.pathname === '/health' && request.method === 'GET') return Response.json({ service: 'family-location-wake', version: '2.3.1', configured: Boolean(env.GOOGLE_SERVICE_ACCOUNT_JSON) }, { headers: { 'Cache-Control': 'no-store' } });
+    if (url.pathname === '/health' && request.method === 'GET') return Response.json({ service: 'family-location-wake', version: '2.3.2', configured: Boolean(env.GOOGLE_SERVICE_ACCOUNT_JSON && env.DEVICE_BINDING_PEPPER) }, { headers: { 'Cache-Control': 'no-store' } });
     const operation = routes[url.pathname];
     if (!operation || url.search) return Response.json({ error: 'not_found' }, { status: 404 });
     const method = ['state', 'diagnostics'].includes(operation) ? 'GET' : 'POST';

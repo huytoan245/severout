@@ -135,7 +135,7 @@ test('public keys cached; keys outage is a retryable error, not valid auth', asy
 });
 const awaitToken = await jwt();
 test('public health reveals no secrets; wake fails closed without config', async () => {
-  const r = await worker.fetch(new Request('https://x/health'), {}); assert.deepEqual(await r.json(), { service: 'family-location-wake', version: '2.3.1', configured: false });
+  const r = await worker.fetch(new Request('https://x/health'), {}); assert.deepEqual(await r.json(), { service: 'family-location-wake', version: '2.3.2', configured: false });
   const denied = await worker.fetch(new Request('https://x/v1/wake', { method: 'POST', body: '{}' }), {}); assert.equal(denied.status, 503);
 });
 test('configured endpoints reject unauthenticated payloads before any storage access', async () => {

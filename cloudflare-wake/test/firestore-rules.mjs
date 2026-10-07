@@ -18,10 +18,10 @@ try {
   await env.withSecurityRulesDisabled(async context => { await setDoc(doc(context.firestore(), 'families/family-01'), {familyId:'family-01',childDeviceId:'child-01',parentUid:'test-parent',childUid:'test-child',epoch:1,locked:true}); await setDoc(doc(context.firestore(), path), { refreshRequestedAt: 1, fcmTokenGeneration: 1, fcmToken: 'old', fcmTokenOwnerUid: 'test-child' }); });
   await pass(getDoc(doc(parent, path))); await pass(getDoc(doc(child, path)));
   await deny(getDoc(doc(stranger, path))); await deny(getDoc(doc(anonymous, path)));
-  await pass(setDoc(doc(parent, path), { refreshRequestedAt: now, refreshExpiresAt: now + 900000, refreshRequestedBy: 'test-parent' }, { merge: true }));
+  await pass(setDoc(doc(parent, path), { refreshRequestedAt: now, refreshExpiresAt: now + 900000, refreshRequestedBy: 'test-parent', refreshEpoch:1 }, { merge: true }));
   await deny(setDoc(doc(parent, path), { fcmToken: 'attacker-token' }, { merge: true }));
   await deny(setDoc(doc(stranger, path), { fcmToken: 'attacker-token', fcmTokenOwnerUid: 'test-child', fcmTokenGeneration: 100 }, { merge: true }));
-  await deny(setDoc(doc(parent, path), { refreshRequestedAt: now - 1, refreshExpiresAt: now - 1 + 900000, refreshRequestedBy: 'test-parent' }, { merge: true }));
+  await deny(setDoc(doc(parent, path), { refreshRequestedAt: now - 1, refreshExpiresAt: now - 1 + 900000, refreshRequestedBy: 'test-parent', refreshEpoch:1 }, { merge: true }));
   await deny(setDoc(doc(parent, path), { refreshRequestedBy: 'test-child' }, { merge: true }));
   await deny(setDoc(doc(child, path), { fcmToken: 'new', fcmTokenGeneration: 2, fcmTokenOwnerUid: 'test-child' }, { merge: true }));
   await deny(setDoc(doc(child, path), { fcmToken: 'old-delayed', fcmTokenGeneration: 1 }, { merge: true }));
@@ -30,7 +30,7 @@ try {
   await deny(setDoc(doc(parent, path), { wakeDispatchResult: 'sent' }, { merge: true }));
   await deny(setDoc(doc(child, path), { wakeDispatchResult: 'sent' }, { merge: true }));
   await pass(setDoc(doc(child, path), { refreshReceivedFor: now, refreshCompletedFor: now, lastLat: 20.0, heartbeatAt: now }, { merge: true }));
-  await pass(setDoc(doc(parent, path), { locationReminderRequestedAt: now, locationReminderExpiresAt: now + 900000 }, { merge: true }));
+  await pass(setDoc(doc(parent, path), { locationReminderEpoch:1, locationReminderRequestedAt: now, locationReminderExpiresAt: now + 900000 }, { merge: true }));
   await pass(setDoc(doc(child, path), { locationReminderAckFor: now, locationReminderResult: 'shown' }, { merge: true }));
   await pass(setDoc(doc(child, path + '/events/id'), { type: 'location_sample', id: 'sample-id', time: now, lat: 20.0, lon: 105.0 }));
   await pass(getDoc(doc(parent, path + '/events/id')));
@@ -80,5 +80,20 @@ try {
   const committed=await api.readFamily();assert.equal(committed.parentUid,'replacement-parent');assert.equal(committed.parentBootstrapConsumed,true);assert.equal(committed.parentBootstrapHash,hash);count++;
   await deny(getDoc(doc(parent,path)));
   await pass(getDoc(doc(env.authenticatedContext('replacement-parent').firestore(),path)));
+  // Actual server rebind commit on the emulator: family/audit/token atomic CAS.
+  family=await api.readFamily();
+  const rebound={...family,childUid:'reinstalled-child',childKey:'new-public-key',childDeviceBindingHash:'hash-only-test-binding',epoch:family.epoch+1,childRebindGeneration:1};
+  assert.equal(await api.rebindIdentity(family,rebound,'child',{oldUidHash:'old-hash',oldKeyHash:'old-key-hash',newUidHash:'new-hash',proofHash:'proof',time:now}),true);count++;
+  assert.equal(await api.rebindIdentity(family,rebound,'child',{oldUidHash:'old-hash',oldKeyHash:'old-key-hash',newUidHash:'new-hash',proofHash:'race',time:now}),false);count++;
+  const newChild=env.authenticatedContext('reinstalled-child').firestore(),newParent=env.authenticatedContext('replacement-parent').firestore();
+  await deny(getDoc(doc(child,path)));await deny(setDoc(doc(child,path),{heartbeatAt:now+1},{merge:true}));await deny(setDoc(doc(child,path),{refreshAckFor:now},{merge:true}));
+  await pass(getDoc(doc(newChild,path)));await pass(getDoc(doc(newChild,path+'/events/id')));
+  await pass(setDoc(doc(newChild,path),{heartbeatAt:now+2},{merge:true}));
+  await deny(setDoc(doc(newChild,path),{refreshServiceFor:now},{merge:true}));
+  await deny(setDoc(doc(newParent,path),{refreshRequestedAt:now+1,refreshExpiresAt:now+1+900000,refreshRequestedBy:'replacement-parent',refreshEpoch:1},{merge:true}));
+  await pass(setDoc(doc(newParent,path),{refreshRequestedAt:now+1,refreshExpiresAt:now+1+900000,refreshRequestedBy:'replacement-parent',refreshEpoch:rebound.epoch},{merge:true}));
+  await pass(setDoc(doc(newChild,path),{refreshServiceFor:now+1},{merge:true}));
+  const deviceAfter=await api.readDocument(api.docUrl());assert.equal(deviceAfter.fcmToken,'');assert.equal(deviceAfter.fcmTokenOwnerUid,'');assert.equal(deviceAfter.fcmTokenGeneration,101);assert.equal(deviceAfter.lastLat,20);count++;
+  await pass(getDoc(doc(newParent,path+'/events/id')));
   console.log(`PASS: ${count} actual Firestore emulator security-rule assertions. Fixture UIDs/project only; no production writes.`);
 } finally { await env.cleanup(); }

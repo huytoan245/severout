@@ -4,14 +4,15 @@ param(
     [Parameter(Mandatory=$true)][string]$AndroidSdk,
     [Parameter(Mandatory=$true)][string]$JavaHome,
     [string]$UnsignedDirectory,
-    [ValidateSet('2.3.0','2.3.1')][string]$Version = '2.3.0',
+    [ValidateSet('2.3.0','2.3.1','2.3.2')][string]$Version = '2.3.0',
     [string]$BuildToolsVersion,
     [switch]$CheckEnvironmentOnly
 )
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'ReleaseSigning.Common.ps1')
 . (Join-Path $PSScriptRoot 'Bootstrap.Common.ps1')
-$VersionCode = if ($Version -ceq '2.3.1') { 35 } else { 34 }
+if ($Version -ceq '2.3.2') { . (Join-Path $PSScriptRoot 'Bootstrap.V232.Common.ps1') }
+$VersionCode = if ($Version -ceq '2.3.2') { 36 } elseif ($Version -ceq '2.3.1') { 35 } else { 34 }
 $releaseTag = $Version.Replace('.', '')
 if (-not $UnsignedDirectory) { $UnsignedDirectory = Join-Path $PSScriptRoot ('..\out\v' + $releaseTag) }
 $repo = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
@@ -28,7 +29,7 @@ $signerReady = Invoke-ReleaseTool $java @('-jar', $tools.ApkSignerJar, 'version'
 if ($signerReady.ExitCode -ne 0) { throw "apksigner implementation failed (exit $($signerReady.ExitCode)): $($tools.ApkSignerJar)" }
 $gate = Get-Content -LiteralPath (Join-Path $UnsignedDirectory 'AUTOMATED-GATE.json') -Raw | ConvertFrom-Json
 if ($gate.status -ne 'PASS' -or -not $gate.inputHashes) { throw 'Automated build/test gate is missing or failed.' }
-if ($Version -ceq '2.3.1' -and ($gate.VersionName -cne $Version -or $gate.VersionCode -ne $VersionCode)) { throw 'Automated gate belongs to a different release.' }
+if ($Version -cne '2.3.0' -and ($gate.VersionName -cne $Version -or $gate.VersionCode -ne $VersionCode)) { throw 'Automated gate belongs to a different release.' }
 foreach ($property in $gate.inputHashes.PSObject.Properties) {
     $inputPath = Join-Path (Join-Path $repo 'appsrc') $property.Name
     if ((Get-FileHash -LiteralPath $inputPath -Algorithm SHA256).Hash.ToLowerInvariant() -cne $property.Value) { throw 'Android input differs from the tested candidate; rebuild before signing.' }
@@ -50,6 +51,7 @@ foreach ($app in @('Parent', 'Child')) {
     } finally { Remove-ReleaseNativeApkInput $inputFile }
 }
 if ($Version -ceq '2.3.1') { Assert-BootstrapApkPair $UnsignedDirectory }
+if ($Version -ceq '2.3.2') { Assert-BootstrapApkPairV232 $UnsignedDirectory }
 if ($CheckEnvironmentOnly) { Write-Output 'Environment/unsigned input gates PASS. No password read, keystore inspection/signing or Installable publication performed.'; return }
 $stage = Join-Path ([IO.Path]::GetTempPath()) ('family-location-sign-' + [guid]::NewGuid().ToString('N'))
 $previous = $env:FAMILY_LOCATION_KS_PASSWORD

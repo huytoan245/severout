@@ -1,9 +1,10 @@
 import { ApiError, GoogleApi, b64, unb64 } from './google.js';
 import { validateRequest } from './coordinator.js';
+import { bindingHash, canonicalHash, constantTimeEqual } from './device-binding.js';
 const utf8 = new TextEncoder();
 const roles = ['parent', 'child'];
-const purposes = ['register', 'token', 'wake'];
-export const proofMessage = (uid, role, nonce, purpose, hash) => `FL231\nfamily-01\nchild-01\n${role}\n${uid}\n${nonce}\n${purpose}\n${hash}`;
+const purposes = ['register', 'rebind', 'token', 'wake'];
+export const proofMessage = (uid, role, nonce, purpose, hash) => `FL232\nfamily-01\nchild-01\n${role}\n${uid}\n${nonce}\n${purpose}\n${hash}`;
 export const digest = async text => b64(await crypto.subtle.digest('SHA-256', utf8.encode(text)));
 const exact = (value, keys) => value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length === keys.length && keys.every(k => Object.hasOwn(value, k));
 const json = (body, status = 200) => Response.json(body, { status, headers: { 'Cache-Control': 'no-store' } });
@@ -36,7 +37,7 @@ export class FamilyRegistry {
   }
   async family() {
     const f = await this.api.readFamily();
-    if (f.updateTime && (f.familyId !== 'family-01' || f.childDeviceId !== 'child-01' || !Number.isSafeInteger(f.epoch) || f.epoch < 1 || (f.parentUid && f.parentUid === f.childUid))) throw new ApiError('invalid_family_state');
+    if (f.updateTime && (f.schemaVersion !== 232 || f.familyId !== 'family-01' || f.childDeviceId !== 'child-01' || !Number.isSafeInteger(f.epoch) || f.epoch < 1 || (f.parentUid && f.parentUid === f.childUid))) throw new ApiError('invalid_family_state');
     return f;
   }
   async fetch(request) {
@@ -54,20 +55,23 @@ export class FamilyRegistry {
           if (!exact(body, ['familyId', 'deviceId', 'role', 'purpose']) || body.familyId !== 'family-01' || body.deviceId !== 'child-01' || !roles.includes(body.role) || !purposes.includes(body.purpose) || (body.purpose === 'wake' && body.role !== 'parent') || (body.purpose === 'token' && body.role !== 'child')) throw new ApiError('invalid_request', 400);
           const f = await this.family(), owner = f[body.role + 'Uid'];
           if ((f.retiredUidHashes || '').split(',').includes(await digest(uid))) throw new ApiError('retired_identity', 403);
-          if (owner && owner !== uid) throw new ApiError('slot_occupied', 403);
+          if (body.purpose === 'rebind') {
+            if (!owner || !canonicalHash(f[body.role+'DeviceBindingHash'])) throw new ApiError('operator_recovery_required', 403);
+            if (!canonicalHash(this.env.DEVICE_BINDING_PEPPER)) throw new ApiError('binding_not_configured');
+          } else if (owner && owner !== uid) throw new ApiError('slot_occupied', 403);
           if (uid === f[(body.role === 'parent' ? 'child' : 'parent') + 'Uid']) throw new ApiError('role_conflict', 403);
-          if (body.purpose !== 'register' && owner !== uid) throw new ApiError('role_not_registered', 403);
+          if (!['register','rebind'].includes(body.purpose) && owner !== uid) throw new ApiError('role_not_registered', 403);
           if (!owner) {
             if (this.env.ENROLLMENT_ENABLED !== 'true') throw new ApiError('enrollment_closed', 403);
             this.bootstrapAvailable(f, body.role);
           }
           const nonce = b64(crypto.getRandomValues(new Uint8Array(32))), expires = this.clock() + 120000;
-          await this.ctx.storage.put('nonce:' + nonce, { uid, role: body.role, purpose: body.purpose, expires, epoch: f.epoch || 1 });
-          return json({ nonce, expires, needsBootstrap: body.purpose === 'register' && !owner });
+          await this.ctx.storage.put('nonce:' + nonce, { uid, role: body.role, purpose: body.purpose, expires, epoch: f.epoch || 1, generation: f[body.role+'RebindGeneration'] || 0 });
+          return json({ nonce, expires, epoch:f.epoch, needsBootstrap: body.purpose === 'register' && !owner });
         }
-        const role = operation === 'registerParent' || operation === 'wake' ? 'parent' : 'child';
-        const purpose = operation.startsWith('register') ? 'register' : operation;
-        if (!['registerParent', 'registerChild', 'token', 'wake'].includes(operation) || !exact(body, ['nonce', 'signature', 'publicKey', 'payload']) || typeof body.nonce !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(body.nonce) || typeof body.payload !== 'string' || utf8.encode(body.payload).length > 3072 || typeof body.publicKey !== 'string' || !/^[A-Za-z0-9_-]{120,160}$/.test(body.publicKey) || typeof body.signature !== 'string' || !/^[A-Za-z0-9_-]{86}$/.test(body.signature)) throw new ApiError('invalid_proof', 400);
+        const role = ['registerParent','rebindParent','wake'].includes(operation) ? 'parent' : 'child';
+        const purpose = operation.startsWith('register') ? 'register' : operation.startsWith('rebind') ? 'rebind' : operation;
+        if (!['registerParent', 'registerChild', 'rebindParent', 'rebindChild', 'token', 'wake'].includes(operation) || !exact(body, ['nonce', 'signature', 'publicKey', 'payload']) || typeof body.nonce !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(body.nonce) || typeof body.payload !== 'string' || utf8.encode(body.payload).length > 3072 || typeof body.publicKey !== 'string' || !/^[A-Za-z0-9_-]{120,160}$/.test(body.publicKey) || typeof body.signature !== 'string' || !/^[A-Za-z0-9_-]{86}$/.test(body.signature)) throw new ApiError('invalid_proof', 400);
         const key = 'nonce:' + body.nonce, challenge = await this.ctx.storage.get(key);
         if (!challenge || challenge.expires <= this.clock() || challenge.uid !== uid || challenge.role !== role || challenge.purpose !== purpose) throw new ApiError('invalid_nonce', 403);
         const hash = await digest(JSON.stringify(body));
@@ -79,11 +83,16 @@ export class FamilyRegistry {
           if (!await crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, publicKey, unb64(body.signature), utf8.encode(proofMessage(uid, role, body.nonce, purpose, await digest(body.payload))))) throw new Error();
         } catch { throw new ApiError('invalid_signature', 403); }
         const f = await this.family();
+        if ((f.retiredUidHashes || '').split(',').includes(await digest(uid))) throw new ApiError('retired_identity', 403);
+        if (purpose === 'rebind' && f[role+'RebindProofHash'] === hash && f[role+'Uid'] === uid && f[role+'Key'] === body.publicKey && f[role+'RebindGeneration'] === challenge.generation + 1) {
+          return json({ ...familyState(f), registered:true, rebound:true, role });
+        }
         if ((f.epoch || 1) !== challenge.epoch) throw new ApiError('family_changed', 403);
-        if (f[role + 'Uid'] && (f[role + 'Uid'] !== uid || f[role + 'Key'] !== body.publicKey)) throw new ApiError('slot_occupied', 403);
-        if (purpose !== 'register' && (!f[role + 'Uid'] || f[role + 'Key'] !== body.publicKey)) throw new ApiError('role_not_registered', 403);
+        if (purpose !== 'rebind' && f[role + 'Uid'] && (f[role + 'Uid'] !== uid || f[role + 'Key'] !== body.publicKey)) throw new ApiError('slot_occupied', 403);
+        if (!['register','rebind'].includes(purpose) && (!f[role + 'Uid'] || f[role + 'Key'] !== body.publicKey)) throw new ApiError('role_not_registered', 403);
+        let deviceBinding;
         if (purpose === 'register') {
-          if (!(exact(payload, ['familyId', 'deviceId', 'version']) || exact(payload, ['familyId', 'deviceId', 'version', 'bootstrap'])) || payload.familyId !== 'family-01' || payload.deviceId !== 'child-01' || payload.version !== '2.3.1') throw new ApiError('invalid_request', 400);
+          if (!(exact(payload, ['familyId', 'deviceId', 'version', 'deviceRecoveryMaterial']) || exact(payload, ['familyId', 'deviceId', 'version', 'deviceRecoveryMaterial', 'bootstrap'])) || payload.familyId !== 'family-01' || payload.deviceId !== 'child-01' || payload.version !== '2.3.2' || !canonicalHash(payload.deviceRecoveryMaterial)) throw new ApiError('invalid_request', 400);
           if (f[role + 'Uid']) {
             // Only the identical committed claim can retry a consumed capability.
             // A fresh proof for the existing UID/key must omit bootstrap entirely.
@@ -91,7 +100,16 @@ export class FamilyRegistry {
           } else {
             this.bootstrapAvailable(f, role);
             if (typeof payload.bootstrap !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(payload.bootstrap) || b64(unb64(payload.bootstrap)) !== payload.bootstrap || await digest(payload.bootstrap) !== f[role + 'BootstrapHash']) throw new ApiError('invalid_bootstrap', 403);
+            deviceBinding = await bindingHash(this.env.DEVICE_BINDING_PEPPER, role, payload.deviceRecoveryMaterial);
           }
+        } else if (purpose === 'rebind') {
+          if (!exact(payload,['familyId','deviceId','version','deviceRecoveryMaterial']) || payload.familyId !== 'family-01' || payload.deviceId !== 'child-01' || payload.version !== '2.3.2') throw new ApiError('invalid_request',400);
+          if (!f[role+'Uid'] || !canonicalHash(f[role+'DeviceBindingHash'])) throw new ApiError('operator_recovery_required',403);
+          deviceBinding = await bindingHash(this.env.DEVICE_BINDING_PEPPER, role, payload.deviceRecoveryMaterial);
+          if (!constantTimeEqual(deviceBinding,f[role+'DeviceBindingHash'])) throw new ApiError('operator_recovery_required',403);
+          if (uid === f[(role === 'parent' ? 'child' : 'parent')+'Uid']) throw new ApiError('role_conflict',403);
+          if (f[role+'Uid'] === uid && f[role+'Key'] === body.publicKey) throw new ApiError('already_registered',409);
+          if (!Number.isSafeInteger(challenge.generation) || challenge.generation < 0 || challenge.generation >= Number.MAX_SAFE_INTEGER || (f[role+'RebindGeneration'] || 0) !== challenge.generation || f.epoch >= Number.MAX_SAFE_INTEGER) throw new ApiError('family_changed',403);
         } else if (purpose === 'token') {
           if (!exact(payload, ['familyId', 'deviceId', 'token', 'generation']) || payload.familyId !== 'family-01' || payload.deviceId !== 'child-01' || typeof payload.token !== 'string' || payload.token.length < 10 || payload.token.length > 2048 || !/^[A-Za-z0-9_:\-.]+$/.test(payload.token) || !Number.isSafeInteger(payload.generation) || payload.generation < 1) throw new ApiError('invalid_request', 400);
         } else validateRequest(payload, this.clock());
@@ -104,11 +122,17 @@ export class FamilyRegistry {
             if (this.env.ENROLLMENT_ENABLED !== 'true') throw new ApiError('enrollment_closed', 403);
             // One conditional Firestore document write claims AND consumes. No
             // plaintext capability is persisted in Firestore or durable storage.
-            const next = { ...f, familyId: 'family-01', childDeviceId: 'child-01', epoch: f.epoch || 1, [role + 'Uid']: uid, [role + 'Key']: body.publicKey, [role + 'RegisteredAt']: this.clock(), [role + 'BootstrapConsumed']: true, [role + 'BootstrapConsumedAt']: this.clock(), [role + 'ClaimProofHash']: hash };
+            const next = { ...f, familyId: 'family-01', childDeviceId: 'child-01', epoch: f.epoch || 1, [role + 'Uid']: uid, [role + 'Key']: body.publicKey, [role + 'DeviceBindingHash']: deviceBinding, [role+'RebindGeneration']:f[role+'RebindGeneration'] || 0, [role + 'RegisteredAt']: this.clock(), [role + 'BootstrapConsumed']: true, [role + 'BootstrapConsumedAt']: this.clock(), [role + 'ClaimProofHash']: hash };
             next.locked = Boolean(next.parentUid && next.childUid);
             if (!await this.api.writeFamily(f, next)) throw new ApiError('registration_raced', 409, true);
             result = { ...familyState(next), registered: true, role };
           } else result = { ...familyState(f), registered: true, role };
+        } else if (purpose === 'rebind') {
+          const retired = new Set((f.retiredUidHashes || '').split(',').filter(Boolean));
+          if (f[role+'Uid'] !== uid) retired.add(await digest(f[role+'Uid']));
+          const next = {...f,epoch:f.epoch+1,[role+'Uid']:uid,[role+'Key']:body.publicKey,[role+'RebindGeneration']:challenge.generation+1,[role+'ReboundAt']:this.clock(),[role+'RebindProofHash']:hash,retiredUidHashes:[...retired].join(',')};
+          if (!await this.api.rebindIdentity(f,next,role,{oldUidHash:await digest(f[role+'Uid']),oldKeyHash:await digest(f[role+'Key']),newUidHash:await digest(uid),proofHash:hash,time:this.clock()})) throw new ApiError('rebind_raced',409,true);
+          result = {...familyState(next),registered:true,rebound:true,role};
         } else if (purpose === 'token') result = await this.api.updateChildToken(f, uid, payload, this.clock());
         else {
           if (!f.childUid) throw new ApiError('child_not_registered', 409, true);
@@ -125,6 +149,9 @@ export class FamilyRegistry {
   }
   bootstrapAvailable(f, role) {
     if (!f.updateTime || !/^[A-Za-z0-9_-]{43}$/.test(f[role + 'BootstrapHash'] || '') || (f.retiredBootstrapHashes || '').split(',').includes(f[role + 'BootstrapHash']) || f.parentBootstrapHash === f.childBootstrapHash || f[role + 'BootstrapConsumed'] !== false) throw new ApiError('bootstrap_unavailable', 403);
-    if (!Number.isSafeInteger(f[role + 'BootstrapExpiresAt']) || f[role + 'BootstrapExpiresAt'] <= this.clock()) throw new ApiError('bootstrap_expired', 403);
+    if (f[role+'BootstrapRevoked'] === true) throw new ApiError('bootstrap_revoked',403);
+    if (f[role+'BootstrapMode'] === 'RECOVERY_EXPIRING') {
+      if (!Number.isSafeInteger(f[role+'BootstrapExpiresAt']) || f[role+'BootstrapExpiresAt'] <= this.clock()) throw new ApiError('bootstrap_expired',403);
+    } else if (f.bootstrapMode !== 'UNTIL_CONSUMED_OR_REVOKED' || Object.hasOwn(f,role+'BootstrapExpiresAt')) throw new ApiError('bootstrap_unavailable',403);
   }
 }

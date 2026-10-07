@@ -19,7 +19,7 @@ require(workerOrigin.scheme == "https" && !workerOrigin.host.isNullOrBlank() && 
 android {
     namespace = "com.family.child"
     compileSdk = 36
-    defaultConfig { applicationId = "com.family.child"; minSdk = 26; targetSdk = 36; versionCode = 35; versionName = "2.3.1"; buildConfigField("String", "WAKE_WORKER_URL", "\"$wakeWorkerUrl\"") }
+    defaultConfig { applicationId = "com.family.child"; minSdk = 26; targetSdk = 36; versionCode = 36; versionName = "2.3.2"; buildConfigField("String", "WAKE_WORKER_URL", "\"$wakeWorkerUrl\"") }
     buildTypes {
         getByName("debug") { buildConfigField("String", "BOOTSTRAP_TOKEN", "\"\"") }
         getByName("release") { buildConfigField("String", "BOOTSTRAP_TOKEN", "\"$bootstrapToken\"") }
