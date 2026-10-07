@@ -123,6 +123,11 @@ try {
     Check $true 'Exact APK identity accepted'
     Assert-ReleaseApkIdentity "package: name='com.family.parent' versionCode='35' versionName='2.3.1'" 'com.family.parent' '2.3.1' 35
     Check $true 'v231/code35 exact APK identity accepted with the unchanged signer gate'
+    Assert-ReleaseApkIdentity "package: name='com.family.parent' versionCode='36' versionName='2.3.2'" 'com.family.parent' '2.3.2' 36
+    Check $true 'v232/code36 exact identity accepted'
+    Reject { Assert-ReleaseApkIdentity "package: name='com.family.parent' versionCode='35' versionName='2.3.1'" 'com.family.parent' '2.3.2' 36 } 'v231 cannot pass v232 gate'
+    Reject { Assert-ReleaseApkIdentity "package: name='com.family.parent' versionCode='36' versionName='2.3.2'" 'com.family.parent' '2.3.2' 35 } 'v232 wrong code rejected'
+
     Reject { Assert-ReleaseApkIdentity "package: name='com.family.parent' versionCode='34' versionName='2.3.0'" 'com.family.parent' '2.3.1' 35 } 'v230 cannot pass the v231 release gate'
     Reject { Assert-ReleaseApkIdentity "package: name='com.family.child' versionCode='35' versionName='2.3.1'" 'com.family.child' '2.3.1' 34 } 'Invalid release version/code pair rejected'
     Reject { Assert-ReleaseApkIdentity "package: name='comXfamilyXparent' versionCode='34' versionName='2.3.0'" 'com.family.parent' } 'Package punctuation is literal'
@@ -137,10 +142,11 @@ try {
     # keystore or installable APK; this tests failure/control flow, not real signing.
     $copy = Join-Path $root 'repo'
     foreach ($dir in @('scripts', 'docs', 'appsrc', 'out')) { New-Item -ItemType Directory -Path (Join-Path $copy $dir) | Out-Null }
-    foreach ($name in @('ReleaseSigning.Common.ps1', 'Bootstrap.Common.ps1', 'sign-release.ps1', 'validate-signed-release.ps1')) { Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) -Destination (Join-Path $copy 'scripts') }
+    foreach ($name in @('ReleaseSigning.Common.ps1', 'Bootstrap.Common.ps1', 'Bootstrap.V232.Common.ps1', 'sign-release.ps1', 'validate-signed-release.ps1')) { Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) -Destination (Join-Path $copy 'scripts') }
     # Control-flow fixtures cannot represent real provisioned DEX; separately
     # test the actual bootstrap scanner in test-bootstrap.ps1 with random inputs.
     [IO.File]::AppendAllText((Join-Path $copy 'scripts/Bootstrap.Common.ps1'), "`nfunction Assert-BootstrapApkPair { }", [Text.UTF8Encoding]::new($false))
+    [IO.File]::AppendAllText((Join-Path $copy 'scripts/Bootstrap.V232.Common.ps1'), "`nfunction Assert-BootstrapApkPairV232 { }", [Text.UTF8Encoding]::new($false))
     $fixtureStage = Join-Path $root 'staging'
     New-Item -ItemType Directory -Path $fixtureStage | Out-Null
     $copiedGate = Join-Path $copy 'scripts/sign-release.ps1'
@@ -229,6 +235,29 @@ function Assert-ReleaseArchiveReadable { }
     & (Join-Path $copy 'scripts/validate-signed-release.ps1') -Version 2.3.1 -JavaHome $javaDir -AndroidSdk $sdkDir -Directory $out | Out-Null
     Check $true 'v231 independent paired ZIP/hash/version/signature gate passes'
     Check ((Get-FileHash -LiteralPath $fakeStore).Hash -ceq $storeHash) 'v231 read-only signer fixture preserved'
+    # Repeat the paired publication/failure gates for v232 with the SAME pin.
+    $commonCopy = Join-Path $copy 'scripts/ReleaseSigning.Common.ps1'
+    $newCommon = (Get-Content -LiteralPath $commonCopy -Raw).Replace("versionCode='35' versionName='2.3.1'", "versionCode='36' versionName='2.3.2'")
+    [IO.File]::WriteAllText($commonCopy, $newCommon, [Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText((Join-Path $copy 'docs/RELEASE_SIGNING_V232.md'), 'Pinned signer SHA-256: `' + $script:ReleaseFingerprint + '`')
+    @{ status = 'PASS'; VersionName = '2.3.2'; VersionCode = 36; inputHashes = @{ 'input.txt' = (Get-FileHash -LiteralPath $input).Hash.ToLowerInvariant() } } | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath (Join-Path $out 'AUTOMATED-GATE.json')
+    $sumLines = foreach ($app in @('Parent','Child')) {
+        $name = "Family-$app-v2.3.2-unsigned.apk"
+        [IO.File]::WriteAllText((Join-Path $out $name), "public v232 mock $app APK - never install")
+        (Get-FileHash -LiteralPath (Join-Path $out $name)).Hash.ToLowerInvariant() + '  ' + $name
+    }
+    $sumLines | Set-Content -LiteralPath (Join-Path $out 'SHA256SUMS.txt')
+    foreach ($mode in @('child-sign','child-cert','child-verify','child-align')) {
+        $env:FAMILY_SIGNING_TEST_MODE = $mode
+        Reject { & (Join-Path $copy 'scripts/sign-release.ps1') -Version 2.3.2 -KeystorePath $fakeStore -JavaHome $javaDir -AndroidSdk $sdkDir -UnsignedDirectory $out } "v232 pair gate rejects $mode"
+        Check (@(Get-ChildItem -LiteralPath $out -Filter '*v2.3.2-Installable.apk').Count -eq 0 -and -not (Test-Path -LiteralPath (Join-Path $out 'Family-Location-v2.3.2-Release.zip'))) "No v232 Installable/Release output after $mode"
+    }
+    $env:FAMILY_SIGNING_TEST_MODE = 'pass'
+    & (Join-Path $copy 'scripts/sign-release.ps1') -Version 2.3.2 -KeystorePath $fakeStore -JavaHome $javaDir -AndroidSdk $sdkDir -UnsignedDirectory $out | Out-Null
+    Check (@(Get-ChildItem -LiteralPath $out -Filter '*v2.3.2-Installable.apk').Count -eq 2 -and (Test-Path -LiteralPath (Join-Path $out 'Family-Location-v2.3.2-Release.zip'))) 'v232 both verified mock outputs promoted with the same signer'
+    & (Join-Path $copy 'scripts/validate-signed-release.ps1') -Version 2.3.2 -JavaHome $javaDir -AndroidSdk $sdkDir -Directory $out | Out-Null
+    Check $true 'v232 independent paired ZIP/hash/version/signature gate passes'
+    Check ((Get-FileHash -LiteralPath $fakeStore).Hash -ceq $storeHash) 'v232 read-only signer fixture preserved'
     # Reload real helpers, then test inspection with an isolated mocked native reader.
     . (Join-Path $PSScriptRoot 'ReleaseSigning.Common.ps1')
     function Invoke-ReleaseTool {

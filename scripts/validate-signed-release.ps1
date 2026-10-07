@@ -4,11 +4,11 @@ param(
     [Parameter(Mandatory=$true)][string]$JavaHome,
     [string]$Directory,
     [string]$BuildToolsVersion,
-    [ValidateSet('2.3.0','2.3.1')][string]$Version = '2.3.0'
+    [ValidateSet('2.3.0','2.3.1','2.3.2')][string]$Version = '2.3.0'
 )
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'ReleaseSigning.Common.ps1')
-$VersionCode = if ($Version -ceq '2.3.1') { 35 } else { 34 }
+$VersionCode = if ($Version -ceq '2.3.2') { 36 } elseif ($Version -ceq '2.3.1') { 35 } else { 34 }
 $releaseTag = $Version.Replace('.', '')
 $docName = 'RELEASE_SIGNING_V' + $releaseTag + '.md'
 if (-not $Directory) { $Directory = Join-Path $PSScriptRoot ('..\out\v' + $releaseTag) }

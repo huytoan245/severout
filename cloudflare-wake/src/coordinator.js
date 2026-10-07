@@ -51,7 +51,7 @@ export class WakeCoordinator {
       const family = await this.api.readFamily();
       if (!family.parentUid || !family.childUid || family.parentUid !== s.parentUid || family.epoch !== s.epoch) throw new ApiError('family_changed', 403);
       const d = await this.api.readDevice();
-      if (d.refreshRequestedAt !== s.id || d.refreshRequestedBy !== family.parentUid || d.refreshExpiresAt !== s.expires) throw new ApiError('command_mismatch', 409);
+      if ((family.schemaVersion === 232 && d.refreshEpoch !== s.epoch) || d.refreshRequestedAt !== s.id || d.refreshRequestedBy !== family.parentUid || d.refreshExpiresAt !== s.expires) throw new ApiError('command_mismatch', 409);
       if (d.refreshCompletedFor === s.id || d.refreshFailedFor === s.id) { s.status = 'completed'; await this.finish(s); return; }
       if (d.refreshReceivedFor === s.id) { s.status = 'received'; await this.finish(s); return; }
       if (d.fcmTokenOwnerUid !== family.childUid) throw new ApiError('child_identity_unconfirmed', 503, true);
@@ -66,7 +66,7 @@ export class WakeCoordinator {
         const current = await this.api.readDevice();
         const currentFamily = await this.api.readFamily();
         if (currentFamily.updateTime !== family.updateTime || currentFamily.epoch !== s.epoch || currentFamily.parentUid !== s.parentUid || currentFamily.childUid !== family.childUid) throw new ApiError('family_changed', 403);
-        if (current.refreshRequestedAt !== s.id || current.refreshRequestedBy !== family.parentUid || current.fcmToken !== d.fcmToken || current.fcmTokenOwnerUid !== family.childUid) throw new ApiError('state_changed', 503, true);
+        if ((currentFamily.schemaVersion === 232 && current.refreshEpoch !== s.epoch) || current.refreshRequestedAt !== s.id || current.refreshRequestedBy !== family.parentUid || current.fcmToken !== d.fcmToken || current.fcmTokenOwnerUid !== family.childUid) throw new ApiError('state_changed', 503, true);
         if (current.refreshCompletedFor === s.id || current.refreshFailedFor === s.id) { s.status = 'completed'; await this.finish(s); return; }
         if (this.clock() >= s.expires) throw new ApiError('expired_request', 410);
         let messageId;

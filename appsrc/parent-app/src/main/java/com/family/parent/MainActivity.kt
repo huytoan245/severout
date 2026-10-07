@@ -704,7 +704,13 @@ fun ParentDashboard(savedState: Bundle?, onMapViewCreated: (MapView) -> Unit) {
                         "locationReminderRequestedAt" to requestAt,
                         "locationReminderExpiresAt" to expiresAt
                     )
-                    db.collection("devices").document(CHILD_DOC).set(payload, SetOptions.merge())
+                    db.runTransaction { tx ->
+                        val family = tx.get(db.collection("families").document("family-01"))
+                        check(family.getString("parentUid") == FirebaseAuth.getInstance().currentUser?.uid)
+                        val previous = tx.get(db.collection("devices").document(CHILD_DOC))
+                        check(previous.getLong("locationReminderRequestedAt") != requestAt || previous.getLong("locationReminderEpoch") == family.getLong("epoch"))
+                        tx.set(db.collection("devices").document(CHILD_DOC), payload + mapOf("locationReminderEpoch" to (family.getLong("epoch") ?: 0L)), SetOptions.merge())
+                    }
                         .addOnSuccessListener {
                             if (reminderRequestId == requestAt) {
                                 reminderConfirmedFor = requestAt
@@ -1186,7 +1192,7 @@ private fun HealthScreen(
 
         item {
             HealthCard("Survival / Android background") {
-                HealthRow("Danh tính Máy Cha", if (EnrollmentClient.registered(LocalContext.current, "parent")) "Đã đăng ký tự động" else "Đang kết nối")
+                HealthRow("Danh tính Máy Cha", EnrollmentClient.status(LocalContext.current))
                 HealthRow("Cloudflare Worker", ParentWakeBridge.endpoint() ?: "Chưa cấu hình")
                 SurvivalHealth.fields.forEach { name -> HealthRow(name, survivalDiagnostics[name] ?: "Chưa xác định") }
                 Text("unusedAppRestricted cho biết tính năng tự thu hồi quyền/hibernation được bật, không chứng minh app hiện đang ngủ. Samsung Sleeping/Deep Sleeping: không có API công khai để xác nhận.", style = MaterialTheme.typography.bodySmall)

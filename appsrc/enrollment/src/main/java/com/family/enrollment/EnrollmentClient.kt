@@ -9,33 +9,20 @@ import java.net.URL
 import java.util.concurrent.TimeUnit
 
 class EnrollmentFailure(val code: String, val status: Int, val requiredGeneration: Long = 0L) : Exception(code) {
-    val retryable: Boolean get() = status >= 500 || status == 429 || status == 401 || status == 409 || code == "invalid_nonce"
+    val retryable: Boolean get() = status >= 500 || status == 429 || status == 401 || status == 409 || code in listOf("invalid_nonce", "family_changed")
 }
 
 /** Blocking bounded transport. Call exclusively from Worker/background threads. */
 object EnrollmentClient {
-    private const val PREFS = "family_enrollment_v231"
+    internal const val PREFS = "family_enrollment_v231"
+    fun status(context: Context): String = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString("membership_status", "Connecting") ?: "Connecting"
     fun registered(context: Context, role: String): Boolean {
         val uid = FirebaseAuth.getInstance().currentUser?.uid ?: return false
-        return context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString("registered_$role", null) == uid
+        val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        return prefs.getInt("binding_protocol", 0) == 232 && prefs.getString("registered_$role", null) == uid && prefs.getString("registered_key", null) == DeviceIdentity.publicKey()
     }
     @Synchronized fun ensureRegistered(context: Context, base: String, role: String, bootstrap: String, force: Boolean = false): String {
-        require(role == "parent" || role == "child")
-        val auth = FirebaseAuth.getInstance()
-        if (auth.currentUser == null) Tasks.await(auth.signInAnonymously(), 20, TimeUnit.SECONDS)
-        val uid = auth.currentUser?.uid ?: throw EnrollmentFailure("no_auth", 503)
-        val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-        val publicKey = DeviceIdentity.publicKey()
-        if (!force && prefs.getString("registered_$role", null) == uid && prefs.getString("registered_key", null) == publicKey) return uid
-        val result = try {
-            signed(context, base, role, "register", JSONObject().put("familyId", "family-01").put("deviceId", "child-01").put("version", "2.3.1"), bootstrap)
-        } catch (e: EnrollmentFailure) {
-            if (e.status == 403 && !e.retryable) prefs.edit().remove("registered_$role").commit()
-            throw e
-        }
-        check(result.optBoolean("registered") && result.optString("role") == role && auth.currentUser?.uid == uid)
-        check(prefs.edit().putString("registered_$role", uid).putString("registered_key", publicKey).commit())
-        return uid
+        return EnrollmentManager.ensure(context, base, role, bootstrap, force)
     }
     @Synchronized fun signed(context: Context, base: String, role: String, purpose: String, payload: JSONObject, bootstrap: String = ""): JSONObject {
         val user = FirebaseAuth.getInstance().currentUser ?: throw EnrollmentFailure("no_auth", 503)
@@ -44,22 +31,24 @@ object EnrollmentClient {
         val raw = payload.toString()
         val journal = EnrollmentJournal(prefs, role)
         var pending = journal.read(uid, purpose, raw, System.currentTimeMillis())
+        if (pending?.getJSONObject("proof")?.optString("publicKey") != DeviceIdentity.publicKey()) pending = null
         if (pending == null) {
             val challenge = call(base, "/v1/challenge", JSONObject().put("familyId", "family-01").put("deviceId", "child-01").put("role", role).put("purpose", purpose), uid)
             val nonce = challenge.getString("nonce")
+            prefs.edit().putLong("membership_epoch", challenge.getLong("epoch")).commit()
             val signedRaw = BootstrapPayload.forChallenge(purpose, payload, challenge, bootstrap).toString()
             val proof = JSONObject().put("nonce", nonce).put("signature", DeviceIdentity.sign(EnrollmentProof.message(uid, role, nonce, purpose, signedRaw)))
                 .put("publicKey", DeviceIdentity.publicKey()).put("payload", signedRaw)
             pending = JSONObject().put("uid", uid).put("purpose", purpose).put("payload", raw).put("savedAt", System.currentTimeMillis()).put("proof", proof)
             journal.save(pending)
         }
-        val path = when (purpose) { "register" -> "/v1/register/$role"; "token" -> "/v1/token"; "wake" -> "/v1/wake"; else -> error("invalid purpose") }
+        val path = when (purpose) { "register" -> "/v1/register/$role"; "rebind" -> "/v1/rebind/$role"; "token" -> "/v1/token"; "wake" -> "/v1/wake"; else -> error("invalid purpose") }
         try {
             val result = call(base, path, pending.getJSONObject("proof"), uid)
             journal.clear()
             return result
         } catch (e: EnrollmentFailure) {
-            if (e.status in 400..499 && e.status != 401 && e.status != 429 && e.code != "state_changed" && e.code != "registration_raced") journal.clear()
+            if (e.status in 400..499 && e.status != 401 && e.status != 429 && e.code != "state_changed" && e.code != "registration_raced" && e.code != "rebind_raced") journal.clear()
             throw e
         }
     }

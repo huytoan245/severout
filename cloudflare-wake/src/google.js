@@ -105,7 +105,7 @@ export class GoogleApi {
       const e = new ApiError('token_revision_conflict', 409); e.requiredGeneration = old + 1; throw e;
     }
     if (payload.generation === old) return { generation: old, confirmed: true };
-    const values = { fcmToken: payload.token, fcmTokenOwnerUid: uid, fcmTokenGeneration: payload.generation, fcmTokenUpdatedAt: now, fcmTokenVersion: '2.3.1', wakeProtocolVersion: 'v231-device-key' };
+    const values = { fcmToken: payload.token, fcmTokenOwnerUid: uid, fcmTokenGeneration: payload.generation, fcmTokenUpdatedAt: now, fcmTokenVersion: '2.3.2', wakeProtocolVersion: 'v232-device-binding' };
     const writes = [
       // A conditional no-op epoch write makes membership and token CAS one
       // atomic commit using only documented Firestore REST Write operations.
@@ -116,6 +116,20 @@ export class GoogleApi {
     if (await this.conflict(r)) throw new ApiError('state_changed', 409, true);
     if (!r.ok) throw new ApiError('token_write_failed', 503, true);
     return { generation: payload.generation, confirmed: true };
+  }
+  async rebindIdentity(previous, next, role, audit) {
+    const writes=[{update:{name:this.familyUrl().split('/v1/')[1],fields:this.fields(next)},currentDocument:{updateTime:previous.updateTime}},
+      {update:{name:this.familyUrl().split('/v1/')[1].replace('/families/family-01',`/familyRebind/${next.epoch}-${role}`),fields:this.fields({...audit,role,epoch:next.epoch,rebindGeneration:next[role+'RebindGeneration']})},currentDocument:{exists:false}}];
+    if(role==='child') {
+      const d=await this.readDocument(this.docUrl());
+      if(!Number.isSafeInteger(d.fcmTokenGeneration||0)||(d.fcmTokenGeneration||0)>=Number.MAX_SAFE_INTEGER)throw new ApiError('invalid_token_revision');
+      const values={fcmToken:'',fcmTokenOwnerUid:'',fcmTokenGeneration:(d.fcmTokenGeneration||0)+1,fcmTokenUpdatedAt:audit.time};
+      writes.push({update:{name:this.docUrl().split('/v1/')[1],fields:this.fields(values)},updateMask:{fieldPaths:Object.keys(values)},currentDocument:d.updateTime?{updateTime:d.updateTime}:{exists:false}});
+    }
+    const r=await this.call(this.docUrl().replace('/documents/devices/child-01','/documents:commit'),{method:'POST',body:JSON.stringify({writes})});
+    if(await this.conflict(r))return false;
+    if(!r.ok)throw new ApiError('rebind_write_failed',503,true);
+    return true;
   }
   async readDevice() {
     const r = await this.call(this.docUrl());

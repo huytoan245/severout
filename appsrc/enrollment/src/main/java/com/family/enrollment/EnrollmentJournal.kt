@@ -6,6 +6,10 @@ import org.json.JSONObject
 /** Commit before POST so another process instance can replay the exact proof. */
 internal class EnrollmentJournal(private val prefs: SharedPreferences, private val role: String) {
     private val key = "pending_$role"
+    fun pendingRebind(uid: String, now: Long): Boolean {
+        val saved = prefs.getString(key, null)?.let { runCatching { JSONObject(it) }.getOrNull() } ?: return false
+        return read(uid, "rebind", saved.optString("payload"), now) != null
+    }
     fun read(uid: String, purpose: String, payload: String, now: Long): JSONObject? {
         val saved = prefs.getString(key, null)?.let { runCatching { JSONObject(it) }.getOrNull() } ?: return null
         if (saved.optString("uid") != uid || saved.optString("purpose") != purpose || saved.optString("payload") != payload ||

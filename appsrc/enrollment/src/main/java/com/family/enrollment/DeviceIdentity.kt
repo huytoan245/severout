@@ -13,7 +13,7 @@ internal object EnrollmentProof {
     fun base64(bytes: ByteArray): String = Base64.encodeToString(bytes, Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING)
     fun message(uid: String, role: String, nonce: String, purpose: String, payload: String): ByteArray {
         val hash = base64(MessageDigest.getInstance("SHA-256").digest(payload.toByteArray(Charsets.UTF_8)))
-        return "FL231\nfamily-01\nchild-01\n$role\n$uid\n$nonce\n$purpose\n$hash".toByteArray(Charsets.UTF_8)
+        return "FL232\nfamily-01\nchild-01\n$role\n$uid\n$nonce\n$purpose\n$hash".toByteArray(Charsets.UTF_8)
     }
     /** Android's ASN.1 DER ECDSA signature -> WebCrypto's fixed-width r || s. */
     fun rawSignature(der: ByteArray): ByteArray {
@@ -51,6 +51,11 @@ internal object DeviceIdentity {
         return store.getEntry(ALIAS, null) as KeyStore.PrivateKeyEntry
     }
     fun publicKey(): String = EnrollmentProof.base64(entry().certificate.publicKey.encoded)
+    /** Called only on explicit server rejection of a reused/retired installation key. */
+    @Synchronized fun renewInstallationKey() {
+        KeyStore.getInstance("AndroidKeyStore").apply { load(null); deleteEntry(ALIAS) }
+        entry()
+    }
     fun sign(message: ByteArray): String {
         val signer = Signature.getInstance("SHA256withECDSA")
         signer.initSign(entry().privateKey); signer.update(message)

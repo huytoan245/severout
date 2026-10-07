@@ -23,7 +23,7 @@ class WakeTokenSyncWorker(appContext: Context, params: WorkerParameters) : Worke
         fun status(value: String) { prefs.edit().putString("fcm_token_worker_result_v229", value).apply() }
         prefs.edit().putLong("fcm_token_worker_run_at_v229", System.currentTimeMillis()).apply()
         try {
-            val uid = EnrollmentClient.ensureRegistered(app, BuildConfig.WAKE_WORKER_URL, "child", BuildConfig.BOOTSTRAP_TOKEN)
+            val uid = EnrollmentClient.ensureRegistered(app, BuildConfig.WAKE_WORKER_URL, "child", BuildConfig.BOOTSTRAP_TOKEN, force = true)
             val before = TokenState.current(app)
             val sdkToken = Tasks.await(FirebaseMessaging.getInstance().token, 20, TimeUnit.SECONDS)
             val current = TokenState.observe(app, sdkToken, before.generation)
@@ -53,7 +53,7 @@ class WakeTokenSyncWorker(appContext: Context, params: WorkerParameters) : Worke
                 // Token ownership and revision are now server-owned. This write
                 // contains only ordinary Child diagnostics.
                 doc.set(SetupDiagnostics.fields(app) + mapOf("fcmWakeClientVersion" to BuildConfig.VERSION_NAME,
-                    "fcmTokenSyncProtocol" to "v231-device-key"), SetOptions.merge())
+                    "fcmTokenSyncProtocol" to "v232-device-binding"), SetOptions.merge())
                 status("backend_device_key_verified"); return Result.success()
             }
             status("server_unconfirmed"); return Result.retry()

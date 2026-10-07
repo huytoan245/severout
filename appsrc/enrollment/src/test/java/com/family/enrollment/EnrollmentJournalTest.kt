@@ -38,5 +38,16 @@ class EnrollmentJournalTest {
         for (status in listOf(401, 409, 429, 503)) assertTrue(EnrollmentFailure("retry", status).retryable)
         assertFalse(EnrollmentFailure("slot_occupied", 403).retryable)
         assertTrue(EnrollmentFailure("invalid_nonce", 403).retryable)
+        assertTrue(EnrollmentFailure("family_changed", 403).retryable)
+    }
+    @Test fun rebindJournalSurvivesClientDeathAndRetainsExactProofUntilDeadline() {
+        prefs().edit().clear().commit()
+        EnrollmentJournal(prefs(), "child").save(value().put("purpose", "rebind"))
+        val cold = EnrollmentJournal(prefs(), "child")
+        assertTrue(cold.pendingRebind("retained-uid", 2000L))
+        assertEquals("same-signature", cold.read("retained-uid", "rebind", "payload", 2000L)!!.getJSONObject("proof").getString("signature"))
+        assertFalse(cold.pendingRebind("new-uid", 2000L))
+        assertFalse(cold.pendingRebind("retained-uid", 91001L))
+        assertFalse(cold.pendingRebind("retained-uid", 999L))
     }
 }

@@ -10,7 +10,7 @@ def contains(path, values):
     s = path.read_text(encoding='utf-8-sig')
     for value in values: assert value in s, (str(path), value)
     return s
-version, code = ('2.3.1',35) if '--v2210' not in sys.argv and '--v2211' not in sys.argv else (('2.2.10',32) if '--v2210' in sys.argv else ('2.2.11',33))
+version, code = ('2.3.2',36) if '--v2210' not in sys.argv and '--v2211' not in sys.argv else (('2.2.10',32) if '--v2210' in sys.argv else ('2.2.11',33))
 for module, package in [('parent-app','com.family.parent'),('child-app','com.family.child')]:
     contains(root/'appsrc'/module/'build.gradle.kts', [f'applicationId = "{package}"',f'versionCode = {code}',f'versionName = "{version}"'])
     ET.parse(root/'appsrc'/module/'src/main/AndroidManifest.xml')
@@ -45,7 +45,7 @@ if code >= 33:
     contains(child/'TokenState.kt', ['fcm_token_generation_v2211','expected != null','current(context) != snapshot'])
     contains(child/'WakeTokenSyncWorker.kt', ['EnrollmentClient.ensureRegistered','EnrollmentClient.signed','Source.SERVER','TokenState.rebase','backend_device_key_verified'])
     contains(parent/'ParentWakeBridge.kt', ['operation.result.get()','WAKE_WORKER_URL','identity_changed','currentDocument.updateTime','refreshRequestedBy'])
-    contains(parent/'MainActivity.kt', ['SurvivalHealth.fields','Đã đăng ký tự động','Wake backend đã nhận yêu cầu','ParentWakeBridge.prepareCommand'])
+    contains(parent/'MainActivity.kt', ['SurvivalHealth.fields','EnrollmentClient.status','Wake backend đã nhận yêu cầu','ParentWakeBridge.prepareCommand'])
     contains(root/'cloudflare-wake/src/worker.js', ['verifier.verify','body_too_large','FAMILY_REGISTRY'])
     contains(root/'cloudflare-wake/src/coordinator.js', ['storage.transaction','tx.setAlarm','attempts < 8','rate_limited','sentFingerprint'])
     conf=json.loads((root/'cloudflare-wake/wrangler.jsonc').read_text(encoding='utf-8'))
@@ -67,7 +67,7 @@ if code >= 34:
     assert '4675c26756f' not in (root/'scripts/sign-release.ps1').read_text()
     print('v230 canonical source, first-use permission, durable inbox and guarded publication validation passed')
 
-if code == 35:
+if code >= 35:
     contains(root/'cloudflare-wake/src/enrollment.js',['registration_raced','nonce_reused','invalid_signature','slot_occupied','family_changed'])
     contains(parent/'MainActivity.kt',['Đang chờ Máy Con kết nối','Máy Con · Đang kết nối','familyListener.remove()'])
     for path in [root/'cloudflare-wake/src/worker.js',root/'cloudflare-wake/src/coordinator.js',root/'cloudflare-wake/render-rules.mjs']:
@@ -75,7 +75,7 @@ if code == 35:
         assert 'env.PARENT_UID' not in text and 'env.CHILD_UID' not in text
     print('v231 automatic enrollment, dynamic roles and device proof static checks passed')
 
-if code == 35:
+if code >= 35:
     contains(root/'cloudflare-wake/src/enrollment.js',['bootstrapAvailable','BootstrapConsumed','ClaimProofHash','bootstrap_consumed'])
     contains(root/'appsrc/enrollment/src/main/java/com/family/enrollment/BootstrapPayload.kt',['needsBootstrap','purpose == "register"','bootstrap_not_provisioned'])
     contains(root/'scripts/sign-release.ps1',['Assert-BootstrapApkPair'])

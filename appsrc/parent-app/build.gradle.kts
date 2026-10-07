@@ -24,8 +24,8 @@ android {
         minSdk = 26
         targetSdk = 36
         buildConfigField("String", "WAKE_WORKER_URL", "\"$wakeWorkerUrl\"")
-        versionCode = 35
-        versionName = "2.3.1"
+        versionCode = 36
+        versionName = "2.3.2"
     }
     buildTypes {
         getByName("debug") { buildConfigField("String", "BOOTSTRAP_TOKEN", "\"\"") }

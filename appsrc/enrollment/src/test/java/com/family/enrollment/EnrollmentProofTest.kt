@@ -13,9 +13,9 @@ import java.security.spec.ECGenParameterSpec
 @Config(sdk = [35])
 class EnrollmentProofTest {
     @Test fun canonicalProofBindsUidRoleNoncePurposeAndPayload() {
-        val payload = "{\"familyId\":\"family-01\",\"deviceId\":\"child-01\",\"version\":\"2.3.1\"}"
+        val payload = "{\"familyId\":\"family-01\",\"deviceId\":\"child-01\",\"version\":\"2.3.2\"}"
         val original = EnrollmentProof.message("uid", "child", "nonce", "register", payload)
-        assertTrue(String(original).startsWith("FL231\nfamily-01\nchild-01\nchild\nuid\nnonce\nregister\n"))
+        assertTrue(String(original).startsWith("FL232\nfamily-01\nchild-01\nchild\nuid\nnonce\nregister\n"))
         for (changed in listOf(
             EnrollmentProof.message("other", "child", "nonce", "register", payload),
             EnrollmentProof.message("uid", "parent", "nonce", "register", payload),

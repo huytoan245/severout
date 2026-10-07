@@ -68,10 +68,14 @@ object ParentWakeBridge {
     }
     fun durableCommand(request: Long, uid: String) = FirebaseFirestore.getInstance().runTransaction { tx ->
         val doc = FirebaseFirestore.getInstance().collection("devices").document("child-01")
+        val family = tx.get(FirebaseFirestore.getInstance().collection("families").document("family-01"))
+        val epoch = family.getLong("epoch") ?: 0L
+        check(epoch > 0L && family.getString("parentUid") == uid)
         val state = tx.get(doc)
         if (FirebaseAuth.getInstance().currentUser?.uid != uid || (state.getLong("refreshRequestedAt") ?: 0L) > request) false
-        else if (state.getLong("refreshRequestedAt") == request && state.getString("refreshRequestedBy") == uid && state.getLong("refreshExpiresAt") == request + 15 * 60_000L) true
-        else { tx.set(doc, mapOf("refreshRequestedAt" to request, "refreshExpiresAt" to request + 15 * 60_000L, "refreshRequestedBy" to uid), SetOptions.merge()); true }
+        else if (state.getLong("refreshRequestedAt") == request && state.getLong("refreshEpoch") != epoch) false // Do not reauthorize an already bound stale command.
+        else if (state.getLong("refreshRequestedAt") == request && state.getString("refreshRequestedBy") == uid && state.getLong("refreshExpiresAt") == request + 15 * 60_000L && state.getLong("refreshEpoch") == epoch) true
+        else { tx.set(doc, mapOf("refreshRequestedAt" to request, "refreshExpiresAt" to request + 15 * 60_000L, "refreshRequestedBy" to uid, "refreshEpoch" to epoch), SetOptions.merge()); true }
     }
     fun persistFallback(request: Long, uid: String, callback: (Boolean, String?) -> Unit) {
         if (prepared.get() != request) { callback(false, "outbox_not_ready"); return }
@@ -117,16 +121,21 @@ internal object ParentCommandRest {
                 return JSONObject(c.inputStream.bufferedReader().use { it.readText() })
             } finally { c.disconnect() }
         }
+        val family = call(DOC.substringBefore("/devices/") + "/families/family-01")?.optJSONObject("fields") ?: return false
+        if (family.optJSONObject("parentUid")?.optString("stringValue") != uid) return false
+        val epoch = family.optJSONObject("epoch")?.optString("integerValue")?.toLongOrNull() ?: return false
         val before = call(DOC) ?: return false
         val current = before.optJSONObject("fields") ?: JSONObject()
         val existing = current.optJSONObject("refreshRequestedAt")?.optString("integerValue")?.toLongOrNull() ?: 0L
         if (existing > id) return true // superseded: do not mutate the newer command
-        if (existing == id && current.optJSONObject("refreshRequestedBy")?.optString("stringValue") == uid) return true
+        if (existing == id && current.optJSONObject("refreshEpoch")?.optString("integerValue") != epoch.toString()) return false
+        if (existing == id && current.optJSONObject("refreshRequestedBy")?.optString("stringValue") == uid && current.optJSONObject("refreshEpoch")?.optString("integerValue") == epoch.toString()) return true
         val time = before.optString("updateTime"); if (time.isBlank() || FirebaseAuth.getInstance().currentUser?.uid != uid) return false
         val fields = JSONObject().put("refreshRequestedAt", JSONObject().put("integerValue", id.toString()))
             .put("refreshExpiresAt", JSONObject().put("integerValue", (id + 15 * 60_000L).toString()))
             .put("refreshRequestedBy", JSONObject().put("stringValue", uid))
-        val query = "updateMask.fieldPaths=refreshRequestedAt&updateMask.fieldPaths=refreshExpiresAt&updateMask.fieldPaths=refreshRequestedBy&currentDocument.updateTime=${java.net.URLEncoder.encode(time, "UTF-8")}"
+            .put("refreshEpoch", JSONObject().put("integerValue", epoch.toString()))
+        val query = "updateMask.fieldPaths=refreshEpoch&updateMask.fieldPaths=refreshRequestedAt&updateMask.fieldPaths=refreshExpiresAt&updateMask.fieldPaths=refreshRequestedBy&currentDocument.updateTime=${java.net.URLEncoder.encode(time, "UTF-8")}"
         return call("$DOC?$query", JSONObject().put("fields", fields)) != null
     }
 }
