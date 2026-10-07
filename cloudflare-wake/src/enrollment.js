@@ -91,6 +91,7 @@ export class FamilyRegistry {
           return json({ ...familyState(f), registered:true, rebound:true, role });
         }
         if ((f.epoch || 1) !== challenge.epoch) throw new ApiError('family_changed', 403);
+        if ((f.retiredKeyHashes || '').split(',').includes(await digest(body.publicKey))) throw new ApiError('fresh_key_required',403);
         if (purpose !== 'rebind' && f[role + 'Uid'] && (f[role + 'Uid'] !== uid || f[role + 'Key'] !== body.publicKey)) throw new ApiError('slot_occupied', 403);
         if (!['register','rebind'].includes(purpose) && (!f[role + 'Uid'] || f[role + 'Key'] !== body.publicKey)) throw new ApiError('role_not_registered', 403);
         let deviceBinding;
@@ -112,6 +113,7 @@ export class FamilyRegistry {
           if (!constantTimeEqual(deviceBinding,f[role+'DeviceBindingHash'])) throw new ApiError('operator_recovery_required',403);
           if (uid === f[(role === 'parent' ? 'child' : 'parent')+'Uid']) throw new ApiError('role_conflict',403);
           if (f[role+'Uid'] === uid) throw new ApiError('fresh_identity_required',403);
+          if (f[role+'Key'] === body.publicKey) throw new ApiError('fresh_key_required',403);
           if (f[role+'Uid'] === uid && f[role+'Key'] === body.publicKey) throw new ApiError('already_registered',409);
           if (!Number.isSafeInteger(challenge.generation) || challenge.generation < 0 || challenge.generation >= Number.MAX_SAFE_INTEGER || (f[role+'RebindGeneration'] || 0) !== challenge.generation || f.epoch >= Number.MAX_SAFE_INTEGER) throw new ApiError('family_changed',403);
         } else if (purpose === 'token') {
@@ -134,7 +136,9 @@ export class FamilyRegistry {
         } else if (purpose === 'rebind') {
           const retired = new Set((f.retiredUidHashes || '').split(',').filter(Boolean));
           retired.add(await digest(f[role+'Uid']));
-          const next = {...f,epoch:f.epoch+1,[role+'Uid']:uid,[role+'Key']:body.publicKey,[role+'RebindGeneration']:challenge.generation+1,[role+'ReboundAt']:this.clock(),[role+'RebindProofHash']:hash,retiredUidHashes:[...retired].join(',')};
+          const retiredKeys = new Set((f.retiredKeyHashes || '').split(',').filter(Boolean));
+          retiredKeys.add(await digest(f[role+'Key']));
+          const next = {...f,epoch:f.epoch+1,[role+'Uid']:uid,[role+'Key']:body.publicKey,[role+'RebindGeneration']:challenge.generation+1,[role+'ReboundAt']:this.clock(),[role+'RebindProofHash']:hash,retiredUidHashes:[...retired].join(','),retiredKeyHashes:[...retiredKeys].join(',')};
           if (!await this.api.rebindIdentity(f,next,role,{oldUidHash:await digest(f[role+'Uid']),oldKeyHash:await digest(f[role+'Key']),newUidHash:await digest(uid),proofHash:hash,time:this.clock()})) throw new ApiError('rebind_raced',409,true);
           result = {...familyState(next),registered:true,rebound:true,role};
         } else if (purpose === 'token') result = await this.api.updateChildToken(f, uid, payload, this.clock());

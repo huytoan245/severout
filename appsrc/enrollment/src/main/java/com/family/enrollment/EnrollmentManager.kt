@@ -9,7 +9,7 @@ import java.util.concurrent.TimeUnit
 internal object EnrollmentManager {
     fun payload(material: String) = JSONObject().put("familyId", "family-01").put("deviceId", "child-01")
         .put("version", "2.3.2").put("deviceRecoveryMaterial", material)
-    fun ensure(context: Context, base: String, role: String, bootstrap: String, force: Boolean, allowAuthReset: Boolean = true): String {
+    fun ensure(context: Context, base: String, role: String, bootstrap: String, force: Boolean, allowAuthReset: Boolean = true, allowKeyReset: Boolean = true): String {
         require(role in listOf("parent", "child"))
         val auth = FirebaseAuth.getInstance()
         if (auth.currentUser == null) Tasks.await(auth.signInAnonymously(), 20, TimeUnit.SECONDS)
@@ -34,7 +34,13 @@ internal object EnrollmentManager {
                 EnrollmentJournal(prefs, role).clear()
                 auth.signOut()
                 Tasks.await(auth.signInAnonymously(), 20, TimeUnit.SECONDS)
-                return ensure(context, base, role, bootstrap, true, false)
+                return ensure(context, base, role, bootstrap, true, false, allowKeyReset)
+            }
+            if (e.code == "fresh_key_required" && allowKeyReset) {
+                prefs.edit().remove("registered_$role").remove("registered_key").commit()
+                EnrollmentJournal(prefs, role).clear()
+                DeviceIdentity.renewInstallationKey()
+                return ensure(context, base, role, bootstrap, true, allowAuthReset, false)
             }
             if (e.status == 403 && !e.retryable) prefs.edit().remove("registered_$role").putString("membership_status", "Recovery required").commit()
             throw e

@@ -5,6 +5,15 @@ import {bindingHash,constantTimeEqual} from '../src/device-binding.js';
 import {b64} from '../src/google.js';
 const payload=()=>({familyId:'family-01',deviceId:'child-01',version:'2.3.2'});
 const rebind=async(h,app)=>h.call(app,app.role==='parent'?'rebindParent':'rebindChild',await h.proof(app,'rebind',payload()));
+test('rebind cannot reuse current or permanently retired installation key under a fresh UID',async()=>{
+  const h=harness(),old=await installation('old','parent');await h.enroll(old);
+  assert.equal((await rebind(h,{...old,uid:'fresh-auth-retained-key'})).body.error,'fresh_key_required');
+  const next=await installation('new','parent',old.material);assert.equal((await rebind(h,next)).status,200);
+  assert.equal((await rebind(h,{...old,uid:'newer-auth-old-key'})).body.error,'fresh_key_required');
+  const newest=await installation('newest','parent',old.material);assert.equal((await rebind(h,newest)).status,200);
+  assert.equal((await rebind(h,{...next,uid:'old-key-again'})).body.error,'fresh_key_required');
+  const f=await h.api.readFamily();assert.equal(f.epoch,3);assert.equal(f.retiredKeyHashes.split(',').length,2);
+});
 test('retained Firebase UID with new key must refresh identity so old Firestore JWT loses authority',async()=>{
   const h=harness(),old=await installation('retained','parent');await h.enroll(old);
   const retained=await installation(old.uid,'parent',old.material);assert.equal((await h.proof(retained,'rebind',payload())).body.error,'fresh_identity_required');

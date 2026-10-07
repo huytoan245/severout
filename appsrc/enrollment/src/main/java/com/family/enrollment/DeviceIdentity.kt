@@ -51,6 +51,11 @@ internal object DeviceIdentity {
         return store.getEntry(ALIAS, null) as KeyStore.PrivateKeyEntry
     }
     fun publicKey(): String = EnrollmentProof.base64(entry().certificate.publicKey.encoded)
+    /** Called only on explicit server rejection of a reused/retired installation key. */
+    @Synchronized fun renewInstallationKey() {
+        KeyStore.getInstance("AndroidKeyStore").apply { load(null); deleteEntry(ALIAS) }
+        entry()
+    }
     fun sign(message: ByteArray): String {
         val signer = Signature.getInstance("SHA256withECDSA")
         signer.initSign(entry().privateKey); signer.update(message)
