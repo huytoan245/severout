@@ -91,6 +91,8 @@ try {
   await pass(setDoc(doc(newChild,path),{heartbeatAt:now+2},{merge:true}));
   await deny(setDoc(doc(newChild,path),{refreshServiceFor:now},{merge:true}));
   await deny(setDoc(doc(newParent,path),{refreshRequestedAt:now+1,refreshExpiresAt:now+1+900000,refreshRequestedBy:'replacement-parent',refreshEpoch:1},{merge:true}));
+  await deny(setDoc(doc(newParent,path),{refreshEpoch:rebound.epoch},{merge:true}));
+  await deny(setDoc(doc(newParent,path),{locationReminderEpoch:rebound.epoch},{merge:true}));
   await pass(setDoc(doc(newParent,path),{refreshRequestedAt:now+1,refreshExpiresAt:now+1+900000,refreshRequestedBy:'replacement-parent',refreshEpoch:rebound.epoch},{merge:true}));
   await pass(setDoc(doc(newChild,path),{refreshServiceFor:now+1},{merge:true}));
   const deviceAfter=await api.readDocument(api.docUrl());assert.equal(deviceAfter.fcmToken,'');assert.equal(deviceAfter.fcmTokenOwnerUid,'');assert.equal(deviceAfter.fcmTokenGeneration,101);assert.equal(deviceAfter.lastLat,20);count++;

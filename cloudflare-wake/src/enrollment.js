@@ -57,6 +57,9 @@ export class FamilyRegistry {
           if ((f.retiredUidHashes || '').split(',').includes(await digest(uid))) throw new ApiError('retired_identity', 403);
           if (body.purpose === 'rebind') {
             if (!owner || !canonicalHash(f[body.role+'DeviceBindingHash'])) throw new ApiError('operator_recovery_required', 403);
+            // A fresh UID is necessary to revoke the old Firestore JWT as well
+            // as the old installation key. Rules cannot verify P-256 proofs.
+            if (owner === uid) throw new ApiError('fresh_identity_required', 403);
             if (!canonicalHash(this.env.DEVICE_BINDING_PEPPER)) throw new ApiError('binding_not_configured');
           } else if (owner && owner !== uid) throw new ApiError('slot_occupied', 403);
           if (uid === f[(body.role === 'parent' ? 'child' : 'parent') + 'Uid']) throw new ApiError('role_conflict', 403);
@@ -108,6 +111,7 @@ export class FamilyRegistry {
           deviceBinding = await bindingHash(this.env.DEVICE_BINDING_PEPPER, role, payload.deviceRecoveryMaterial);
           if (!constantTimeEqual(deviceBinding,f[role+'DeviceBindingHash'])) throw new ApiError('operator_recovery_required',403);
           if (uid === f[(role === 'parent' ? 'child' : 'parent')+'Uid']) throw new ApiError('role_conflict',403);
+          if (f[role+'Uid'] === uid) throw new ApiError('fresh_identity_required',403);
           if (f[role+'Uid'] === uid && f[role+'Key'] === body.publicKey) throw new ApiError('already_registered',409);
           if (!Number.isSafeInteger(challenge.generation) || challenge.generation < 0 || challenge.generation >= Number.MAX_SAFE_INTEGER || (f[role+'RebindGeneration'] || 0) !== challenge.generation || f.epoch >= Number.MAX_SAFE_INTEGER) throw new ApiError('family_changed',403);
         } else if (purpose === 'token') {
@@ -129,7 +133,7 @@ export class FamilyRegistry {
           } else result = { ...familyState(f), registered: true, role };
         } else if (purpose === 'rebind') {
           const retired = new Set((f.retiredUidHashes || '').split(',').filter(Boolean));
-          if (f[role+'Uid'] !== uid) retired.add(await digest(f[role+'Uid']));
+          retired.add(await digest(f[role+'Uid']));
           const next = {...f,epoch:f.epoch+1,[role+'Uid']:uid,[role+'Key']:body.publicKey,[role+'RebindGeneration']:challenge.generation+1,[role+'ReboundAt']:this.clock(),[role+'RebindProofHash']:hash,retiredUidHashes:[...retired].join(',')};
           if (!await this.api.rebindIdentity(f,next,role,{oldUidHash:await digest(f[role+'Uid']),oldKeyHash:await digest(f[role+'Key']),newUidHash:await digest(uid),proofHash:hash,time:this.clock()})) throw new ApiError('rebind_raced',409,true);
           result = {...familyState(next),registered:true,rebound:true,role};

@@ -119,6 +119,12 @@ object ParentHttpsBridge {
                             }
                             val family = try { check(c.responseCode in 200..299); JSONObject(c.inputStream.bufferedReader().use { it.readText() }).getJSONObject("fields") } finally { c.disconnect() }
                             check(family.getJSONObject("parentUid").getString("stringValue") == FirebaseAuth.getInstance().currentUser?.uid)
+                            val before = (URL(DOC_URL).openConnection() as HttpURLConnection).apply {
+                                connectTimeout = 8_000; readTimeout = 8_000; instanceFollowRedirects = false
+                                setRequestProperty("Authorization", "Bearer $token")
+                            }
+                            val previous = try { check(before.responseCode in 200..299); JSONObject(before.inputStream.bufferedReader().use { it.readText() }).getJSONObject("fields") } finally { before.disconnect() }
+                            check(long(previous, "locationReminderRequestedAt") != (fields["locationReminderRequestedAt"] as? Long) || long(previous, "locationReminderEpoch") == long(family, "epoch"))
                             fields + mapOf("locationReminderEpoch" to family.getJSONObject("epoch").getString("integerValue").toLong())
                         } else fields
                         val mask = scopedFields.keys.joinToString("&") { "updateMask.fieldPaths=$it" }

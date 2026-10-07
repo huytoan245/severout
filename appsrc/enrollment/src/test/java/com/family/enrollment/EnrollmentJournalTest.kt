@@ -38,6 +38,7 @@ class EnrollmentJournalTest {
         for (status in listOf(401, 409, 429, 503)) assertTrue(EnrollmentFailure("retry", status).retryable)
         assertFalse(EnrollmentFailure("slot_occupied", 403).retryable)
         assertTrue(EnrollmentFailure("invalid_nonce", 403).retryable)
+        assertTrue(EnrollmentFailure("family_changed", 403).retryable)
     }
     @Test fun rebindJournalSurvivesClientDeathAndRetainsExactProofUntilDeadline() {
         prefs().edit().clear().commit()

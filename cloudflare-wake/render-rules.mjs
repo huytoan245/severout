@@ -16,6 +16,7 @@ service cloud.firestore {
       return !request.resource.data.diff(resource.data).affectedKeys().hasAny(['refreshRequestedAt','refreshExpiresAt','refreshRequestedBy','refreshEpoch']) ||
         (request.resource.data.refreshEpoch == family().epoch && request.resource.data.refreshEpoch == family().epoch && request.resource.data.refreshRequestedBy == request.auth.uid && request.resource.data.refreshRequestedAt is int &&
          request.resource.data.refreshRequestedAt >= resource.data.get('refreshRequestedAt',0) &&
+         (request.resource.data.refreshRequestedAt > resource.data.get('refreshRequestedAt',0) || request.resource.data.refreshEpoch == resource.data.get('refreshEpoch',0)) &&
          request.resource.data.refreshExpiresAt == request.resource.data.refreshRequestedAt + 900000);
     }
     function stageValid(changed,key,epoch) {
@@ -44,7 +45,7 @@ service cloud.firestore {
       allow read: if parent() || child();
       allow create: if (parent() && request.resource.data.keys().hasOnly(commandKeys()) && request.resource.data.refreshEpoch == family().epoch && request.resource.data.refreshRequestedBy == request.auth.uid && request.resource.data.refreshRequestedAt is int && request.resource.data.refreshRequestedAt > 0 && request.resource.data.refreshExpiresAt == request.resource.data.refreshRequestedAt + 900000) ||
         (child() && !request.resource.data.keys().hasAny(commandKeys()) && !request.resource.data.keys().hasAny(serverKeys()) && !request.resource.data.keys().hasAny(['fcmToken','fcmTokenGeneration','fcmTokenOwnerUid','fcmTokenUpdatedAt','fcmTokenVersion','wakeProtocolVersion']));
-      allow update: if (parent() && request.resource.data.diff(resource.data).affectedKeys().hasOnly(commandKeys()) && parentCommandValid() && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['locationReminderRequestedAt','locationReminderExpiresAt','locationReminderEpoch']) || request.resource.data.locationReminderEpoch == family().epoch)) ||
+      allow update: if (parent() && request.resource.data.diff(resource.data).affectedKeys().hasOnly(commandKeys()) && parentCommandValid() && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['locationReminderRequestedAt','locationReminderExpiresAt','locationReminderEpoch']) || (request.resource.data.locationReminderEpoch == family().epoch && (request.resource.data.locationReminderRequestedAt > resource.data.get('locationReminderRequestedAt',0) || request.resource.data.locationReminderEpoch == resource.data.get('locationReminderEpoch',0))))) ||
         (child() && !request.resource.data.diff(resource.data).affectedKeys().hasAny(commandKeys()) && !request.resource.data.diff(resource.data).affectedKeys().hasAny(serverKeys()) && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['fcmToken','fcmTokenGeneration','fcmTokenOwnerUid','fcmTokenUpdatedAt','fcmTokenVersion','wakeProtocolVersion']) && childStateValid());
       allow delete: if false;
       match /events/{eventId} {

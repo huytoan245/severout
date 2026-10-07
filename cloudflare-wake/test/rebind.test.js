@@ -5,10 +5,11 @@ import {bindingHash,constantTimeEqual} from '../src/device-binding.js';
 import {b64} from '../src/google.js';
 const payload=()=>({familyId:'family-01',deviceId:'child-01',version:'2.3.2'});
 const rebind=async(h,app)=>h.call(app,app.role==='parent'?'rebindParent':'rebindChild',await h.proof(app,'rebind',payload()));
-test('same retained Firebase UID with new Keystore key rebinds once without retiring itself',async()=>{
+test('retained Firebase UID with new key must refresh identity so old Firestore JWT loses authority',async()=>{
   const h=harness(),old=await installation('retained','parent');await h.enroll(old);
-  const next=await installation(old.uid,'parent',old.material);assert.equal((await rebind(h,next)).status,200);
-  const f=await h.api.readFamily();assert.equal(f.epoch,2);assert.equal(f.parentKey,next.publicKey);assert.equal((await h.call(next,'state')).status,200);
+  const retained=await installation(old.uid,'parent',old.material);assert.equal((await h.proof(retained,'rebind',payload())).body.error,'fresh_identity_required');
+  const next=await installation('fresh-anonymous','parent',old.material);assert.equal((await rebind(h,next)).status,200);
+  const f=await h.api.readFamily();assert.equal(f.epoch,2);assert.equal(f.parentKey,next.publicKey);assert.equal((await h.call(next,'state')).status,200);assert.equal((await h.call(old,'state')).status,403);
   assert.equal((await h.enroll(old)).status,403);
 });
 test('old pending wake/token nonce epoch cannot be accepted after another role rebind',async()=>{

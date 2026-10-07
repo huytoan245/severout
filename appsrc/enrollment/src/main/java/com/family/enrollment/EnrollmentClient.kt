@@ -9,7 +9,7 @@ import java.net.URL
 import java.util.concurrent.TimeUnit
 
 class EnrollmentFailure(val code: String, val status: Int, val requiredGeneration: Long = 0L) : Exception(code) {
-    val retryable: Boolean get() = status >= 500 || status == 429 || status == 401 || status == 409 || code == "invalid_nonce"
+    val retryable: Boolean get() = status >= 500 || status == 429 || status == 401 || status == 409 || code in listOf("invalid_nonce", "family_changed")
 }
 
 /** Blocking bounded transport. Call exclusively from Worker/background threads. */

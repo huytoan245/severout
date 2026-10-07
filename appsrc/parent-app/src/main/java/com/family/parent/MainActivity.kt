@@ -707,6 +707,8 @@ fun ParentDashboard(savedState: Bundle?, onMapViewCreated: (MapView) -> Unit) {
                     db.runTransaction { tx ->
                         val family = tx.get(db.collection("families").document("family-01"))
                         check(family.getString("parentUid") == FirebaseAuth.getInstance().currentUser?.uid)
+                        val previous = tx.get(db.collection("devices").document(CHILD_DOC))
+                        check(previous.getLong("locationReminderRequestedAt") != requestAt || previous.getLong("locationReminderEpoch") == family.getLong("epoch"))
                         tx.set(db.collection("devices").document(CHILD_DOC), payload + mapOf("locationReminderEpoch" to (family.getLong("epoch") ?: 0L)), SetOptions.merge())
                     }
                         .addOnSuccessListener {

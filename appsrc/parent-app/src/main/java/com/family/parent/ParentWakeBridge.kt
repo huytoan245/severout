@@ -73,6 +73,7 @@ object ParentWakeBridge {
         check(epoch > 0L && family.getString("parentUid") == uid)
         val state = tx.get(doc)
         if (FirebaseAuth.getInstance().currentUser?.uid != uid || (state.getLong("refreshRequestedAt") ?: 0L) > request) false
+        else if (state.getLong("refreshRequestedAt") == request && state.getLong("refreshEpoch") != epoch) false // Do not reauthorize an already bound stale command.
         else if (state.getLong("refreshRequestedAt") == request && state.getString("refreshRequestedBy") == uid && state.getLong("refreshExpiresAt") == request + 15 * 60_000L && state.getLong("refreshEpoch") == epoch) true
         else { tx.set(doc, mapOf("refreshRequestedAt" to request, "refreshExpiresAt" to request + 15 * 60_000L, "refreshRequestedBy" to uid, "refreshEpoch" to epoch), SetOptions.merge()); true }
     }
@@ -127,6 +128,7 @@ internal object ParentCommandRest {
         val current = before.optJSONObject("fields") ?: JSONObject()
         val existing = current.optJSONObject("refreshRequestedAt")?.optString("integerValue")?.toLongOrNull() ?: 0L
         if (existing > id) return true // superseded: do not mutate the newer command
+        if (existing == id && current.optJSONObject("refreshEpoch")?.optString("integerValue") != epoch.toString()) return false
         if (existing == id && current.optJSONObject("refreshRequestedBy")?.optString("stringValue") == uid && current.optJSONObject("refreshEpoch")?.optString("integerValue") == epoch.toString()) return true
         val time = before.optString("updateTime"); if (time.isBlank() || FirebaseAuth.getInstance().currentUser?.uid != uid) return false
         val fields = JSONObject().put("refreshRequestedAt", JSONObject().put("integerValue", id.toString()))

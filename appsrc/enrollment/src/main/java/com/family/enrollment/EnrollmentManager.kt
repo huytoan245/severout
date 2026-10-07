@@ -29,7 +29,7 @@ internal object EnrollmentManager {
         } catch (e: EnrollmentFailure) {
             // A restored/retired anonymous identity may get a fresh UID once.
             // The stable binding and new proof still decide server authorization.
-            if (e.code == "retired_identity" && allowAuthReset) {
+            if (e.code in listOf("retired_identity", "fresh_identity_required") && allowAuthReset) {
                 prefs.edit().remove("registered_$role").remove("registered_key").commit()
                 EnrollmentJournal(prefs, role).clear()
                 auth.signOut()
