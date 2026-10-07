@@ -217,7 +217,7 @@ function Remove-ReleaseNativeApkInput {
 
 function Assert-ReleaseApkIdentity {
     param([string]$Badging, [string]$Package, [string]$Version = '2.3.0', [int]$VersionCode = 34)
-    if (($Version -ceq '2.3.0' -and $VersionCode -ne 34) -or ($Version -ceq '2.3.1' -and $VersionCode -ne 35) -or $Version -cnotin @('2.3.0','2.3.1')) { throw 'Unsupported release version/code pair.' }
+    if (($Version -ceq '2.3.0' -and $VersionCode -ne 34) -or ($Version -ceq '2.3.1' -and $VersionCode -ne 35) -or ($Version -ceq '2.3.2' -and $VersionCode -ne 36) -or $Version -cnotin @('2.3.0','2.3.1','2.3.2')) { throw 'Unsupported release version/code pair.' }
     $match = [regex]::Match($Badging, "(?m)^package: name='([^']+)' versionCode='([^']+)' versionName='([^']+)'")
     if (-not $match.Success -or $match.Groups[1].Value -cne $Package -or $match.Groups[2].Value -cne [string]$VersionCode -or $match.Groups[3].Value -cne $Version) { throw 'APK package/version gate failed.' }
 }
