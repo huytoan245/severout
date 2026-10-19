@@ -38,6 +38,8 @@ import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.google.firebase.auth.FirebaseAuth
 import com.family.enrollment.EnrollmentClient
+import com.family.core.*
+import com.google.firebase.firestore.FieldPath
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.MetadataChanges
 import com.google.firebase.firestore.SetOptions
@@ -78,7 +80,8 @@ data class UiEvent(
     val accuracy: Double? = null,
     val id: String = "",
     val offlineSince: Long = 0L,
-    val durationMs: Long = 0L
+    val durationMs: Long = 0L,
+    val documentId: String = ""
 )
 
 data class UiVisit(
@@ -88,7 +91,8 @@ data class UiVisit(
     val durationMs: Long,
     val lat: Double?,
     val lon: Double?,
-    val accuracy: Double?
+    val accuracy: Double?,
+    val completeEvidence: Boolean = false
 )
 
 data class JourneySummary(
@@ -96,7 +100,8 @@ data class JourneySummary(
     val validPoints: Int,
     val stops: Int,
     val movingMs: Long,
-    val stoppedMs: Long
+    val stoppedMs: Long,
+    val gaps: Int = 0
 )
 
 enum class ParentTab { HOME, JOURNEY, HEALTH, SETTINGS }
@@ -235,6 +240,11 @@ fun ParentDashboard(savedState: Bundle?, onMapViewCreated: (MapView) -> Unit) {
     var wakeProgressRank by remember { mutableIntStateOf(0) }
     var refreshText by remember { mutableStateOf("Sẵn sàng cập nhật vị trí") }
     var refreshRequestId by remember { mutableLongStateOf(0L) }
+    var refreshUiTimedOut by remember { mutableStateOf(false) }
+    var refreshEvidence by remember { mutableStateOf<Map<String,Any?>>(emptyMap()) }
+    var evidenceServerRead by remember { mutableStateOf(false) }
+    var historyStatus by remember { mutableStateOf("Đang đồng bộ lịch sử") }
+    var historyContextReady by remember { mutableStateOf(false) }
     var commandConfirmedFor by remember { mutableLongStateOf(0L) }
 
     var reminderText by remember { mutableStateOf("") }
@@ -247,38 +257,27 @@ fun ParentDashboard(savedState: Bundle?, onMapViewCreated: (MapView) -> Unit) {
     var selectedDayStart by remember { mutableLongStateOf(startOfToday()) }
 
     fun processRefreshState(ack: Long, completed: Long, failed: Long, error: String?) {
-        val request = refreshRequestId
-        if (request <= 0L) return
-        if (ack == request || completed == request || failed == request) wakeProgressRank = maxOf(wakeProgressRank, 7)
-        when {
-            completed == request -> {
-                refreshText = "Đã nhận vị trí mới lúc ${if (seen > 0) fmt(seen) else fmt(System.currentTimeMillis())}"
-                refreshRequestId = 0L
-            }
-            failed == request -> {
-                refreshText = "Máy Con không cập nhật được: ${error ?: "không lấy được GPS"}"
-                refreshRequestId = 0L
-            }
-            ack == request && wakeProgressRank <= 7 -> refreshText = "Máy Con đã nhận yêu cầu · đang lấy GPS..."
+        val request=refreshRequestId
+        if(request<=0)return
+        val stage=RefreshTimeline.stage(request,refreshEvidence,evidenceServerRead)
+        val text=when(stage){
+            RefreshStage.REQUESTED -> "Đã yêu cầu · chờ wake backend"
+            RefreshStage.DISPATCHED -> "FCM đã gửi · chưa xác nhận Máy Con nhận"
+            RefreshStage.FCM_RECEIVED -> "FCM đã nhận · chưa xác nhận service chạy"
+            RefreshStage.SERVICE_STARTED -> "Service đã tiếp nhận · ACK đã xác nhận"
+            RefreshStage.GPS_ACQUIRING -> "Đang lấy GPS mới"
+            RefreshStage.GPS_VALIDATED -> "GPS hợp lệ · đang lưu local"
+            RefreshStage.LOCAL_PERSISTED -> "GPS đã lưu local · chưa xác nhận upload"
+            RefreshStage.SERVER_CONFIRMED -> "SERVER_CONFIRMED · GPS mới đã lưu trên máy chủ lúc ${fmt(seen)}"
+            RefreshStage.FAILED -> "FAILED · ${refreshEvidence["refreshErrorCode"] ?: "GPS_ERROR"}: ${error ?: "Chưa lấy được vị trí mới"}"
         }
+        val rank=stage.ordinal+4
+        if(rank>=wakeProgressRank){wakeProgressRank=rank;refreshText=if(refreshUiTimedOut && stage !in setOf(RefreshStage.SERVER_CONFIRMED,RefreshStage.FAILED)) "TIMEOUT_WAITING · $text · lệnh vẫn được theo dõi" else text}
+        if(stage in setOf(RefreshStage.SERVER_CONFIRMED,RefreshStage.FAILED)){refreshRequestId=0;refreshUiTimedOut=false}
     }
 
     fun processWakeProgress(received: Long, service: Long, locating: Long, dispatch: Long, result: String?, backend: Long) {
-        val request = refreshRequestId
-        if (request <= 0L) return
-        val persisted = survivalDiagnostics["refreshPersistedFor"]?.toLongOrNull()
-        val uploaded = survivalDiagnostics["refreshUploadedFor"]?.toLongOrNull()
-        val stage = when {
-            uploaded == request -> 11 to "Vị trí mới đã upload..."
-            persisted == request -> 10 to "Máy Con đã lưu vị trí mới trên máy..."
-            locating == request -> 9 to "Đang lấy GPS mới..."
-            service == request -> 8 to "Service Máy Con đang hoạt động..."
-            received == request -> 7 to "Máy Con đã nhận yêu cầu..."
-            dispatch == request && result == "sent" -> 6 to "FCM đã gửi · chờ Máy Con nhận..."
-            backend == request -> 5 to "Wake backend đã nhận yêu cầu..."
-            else -> return
-        }
-        if (stage.first >= wakeProgressRank) { wakeProgressRank = stage.first; refreshText = stage.second }
+        processRefreshState(0,0,0,lastError)
     }
 
     fun processReminderState(ackFor: Long, result: String?) {
@@ -299,6 +298,7 @@ fun ParentDashboard(savedState: Bundle?, onMapViewCreated: (MapView) -> Unit) {
 
     fun applyRestState(s: ParentHttpsBridge.DeviceState) {
         survivalDiagnostics = s.survivalDiagnostics
+        refreshEvidence=s.refreshEvidence;evidenceServerRead=true
         if (s.lastSeen >= seen && s.lastLat != null) lat = s.lastLat
         if (s.lastSeen >= seen && s.lastLon != null) lon = s.lastLon
         if (s.lastSeen >= seen && s.accuracy != null) acc = s.accuracy
@@ -362,6 +362,7 @@ fun ParentDashboard(savedState: Bundle?, onMapViewCreated: (MapView) -> Unit) {
                 }
                 if (d == null) return@addSnapshotListener
                 deviceFromCache = d.metadata.isFromCache
+                refreshEvidence=d.data?:emptyMap();evidenceServerRead=!d.metadata.isFromCache && !d.metadata.hasPendingWrites()
                 if (!d.metadata.isFromCache) {
                     lastServerSnapshotAt = System.currentTimeMillis()
                     httpsFallbackActive = false
@@ -428,18 +429,6 @@ fun ParentDashboard(savedState: Bundle?, onMapViewCreated: (MapView) -> Unit) {
                 )
             }
 
-        val eventListener = db.collection("devices").document(CHILD_DOC).collection("events")
-            .orderBy("time").limitToLast(5000)
-            .addSnapshotListener(MetadataChanges.INCLUDE) { q, error ->
-                if (error != null) firebaseError = "Nhật ký: ${error.code}"
-                else if (q != null) {
-                    eventFromCache = q.metadata.isFromCache
-                    if (!q.metadata.isFromCache) lastEventServerSnapshotAt = System.currentTimeMillis()
-                    val incoming = q.documents.mapNotNull { it.toObject(UiEvent::class.java) }
-                    events = mergeUiEvents(events, incoming)
-                }
-            }
-
         val cm = context.getSystemService(ConnectivityManager::class.java)
         val main = Handler(Looper.getMainLooper())
         val callback = object : ConnectivityManager.NetworkCallback() {
@@ -456,9 +445,32 @@ fun ParentDashboard(savedState: Bundle?, onMapViewCreated: (MapView) -> Unit) {
         onDispose {
             familyListener.remove()
             deviceListener.remove()
-            eventListener.remove()
             if (registered) try { cm.unregisterNetworkCallback(callback) } catch (_: Exception) {}
         }
+    }
+
+    DisposableEffect(selectedDayStart) {
+        val start=selectedDayStart
+        val end=Calendar.getInstance().apply{timeInMillis=start;add(Calendar.DAY_OF_YEAR,1)}.timeInMillis
+        historyStatus="Đang đồng bộ lịch sử đầy đủ"
+        historyContextReady=false
+        events=emptyList()
+        val cancel=ParentHistoryLoader.load(start,end,{count->historyStatus="Đang đồng bộ · $count bản ghi"}){rows,error->
+            if(rows!=null){events=mergeUiEvents(events,rows);historyContextReady=true;historyStatus="Lịch sử đã đồng bộ; kiểm tra khoảng trống GPS";lastEventServerSnapshotAt=System.currentTimeMillis()}
+            else historyStatus="Lịch sử chưa đầy đủ · ${error?:"OFFLINE"}"
+        }
+        val listener=db.collection("devices").document(CHILD_DOC).collection("events")
+            .whereGreaterThanOrEqualTo("time",start).whereLessThan("time",end).orderBy("time").orderBy(FieldPath.documentId())
+            .addSnapshotListener(MetadataChanges.INCLUDE){page,error->
+                if(error!=null){eventFromCache=true;historyStatus="Lịch sử chưa đầy đủ · đang thử HTTPS"}
+                else if(page!=null){eventFromCache=page.metadata.isFromCache
+                    val rows=page.documents.mapNotNull{doc->doc.toObject(UiEvent::class.java)?.copy(documentId=doc.id)}
+                    events=mergeUiEvents(events,rows)
+                    if(!eventFromCache){lastEventServerSnapshotAt=System.currentTimeMillis();historyStatus=if(historyContextReady)"Lịch sử trong ngày đã đồng bộ; khoảng trống GPS được giữ nguyên" else "Đang khôi phục checkpoint/hành trình qua 0 giờ"}
+                    else historyStatus="OFFLINE · lịch sử cache có thể chưa đầy đủ"
+                }
+            }
+        onDispose{cancel();listener.remove()}
     }
 
     LaunchedEffect(Unit) {
@@ -475,15 +487,15 @@ fun ParentDashboard(savedState: Bundle?, onMapViewCreated: (MapView) -> Unit) {
                     }
                 }
             }
-            val eventStale = eventFromCache || lastEventServerSnapshotAt == 0L || tick - lastEventServerSnapshotAt > EVENT_SERVER_STALE_MS
+            val eventStale = eventFromCache || lastEventServerSnapshotAt == 0L
             if (eventStale && tick - lastHttpsEventsFetchAt > EVENT_HTTPS_FETCH_MIN_INTERVAL_MS) {
                 lastHttpsEventsFetchAt = tick
                 val fetchStart = selectedDayStart
                 val fetchEnd = fetchStart + 24L * 60 * 60 * 1000
                 ParentHttpsBridge.readEvents(fetchStart, fetchEnd) { remote, _ ->
                     if (remote != null) {
-                        val incoming = remote.map { UiEvent(it.type, it.time, it.lat, it.lon, it.accuracy, it.id, it.offlineSince, it.durationMs) }
-                        events = mergeUiEvents(events, incoming)
+                        val incoming = remote.map { UiEvent(it.type, it.time, it.lat, it.lon, it.accuracy, it.id, it.offlineSince, it.durationMs,it.documentId) }
+                        if(selectedDayStart==fetchStart){events = mergeUiEvents(events, incoming);historyStatus="Lịch sử đã đồng bộ qua HTTPS";lastEventServerSnapshotAt=System.currentTimeMillis()}
                         httpsFallbackActive = true
                     }
                 }
@@ -492,26 +504,18 @@ fun ParentDashboard(savedState: Bundle?, onMapViewCreated: (MapView) -> Unit) {
     }
 
     LaunchedEffect(refreshRequestId) {
-        val request = refreshRequestId
-        if (request > 0L) {
-            repeat(4) { index ->
+        val request=refreshRequestId
+        if(request>0){
+            while(refreshRequestId==request && System.currentTimeMillis()<request+WakeRequestPolicy.TTL){
                 delay(10_000L)
-                if (refreshRequestId != request) return@LaunchedEffect
-                ParentHttpsBridge.readDevice { state, _ ->
-                    if (state != null) {
-                        lastHttpsSuccessAt = System.currentTimeMillis()
-                        applyRestState(state)
-                    }
-                }
-                if (index == 2 && commandConfirmedFor != request && refreshRequestId == request) {
-                    refreshText = "Chưa xác nhận được lệnh qua Firebase · đang kiểm tra HTTPS dự phòng..."
+                if(refreshRequestId!=request)return@LaunchedEffect
+                ParentHttpsBridge.readDevice{state,_->if(state!=null && refreshRequestId==request){lastHttpsSuccessAt=System.currentTimeMillis();applyRestState(state)}}
+                if(System.currentTimeMillis()-request>=RefreshTimeline.UI_WAIT_MS && refreshRequestId==request){
+                    refreshUiTimedOut=true
+                    refreshText="TIMEOUT_WAITING · chưa có kết quả cuối; lệnh vẫn được theo dõi. Có thể gửi yêu cầu mới."
                 }
             }
-            delay(5_000L)
-            if (refreshRequestId == request) {
-                refreshText = "Máy Con chưa phản hồi sau 45 giây"
-                refreshRequestId = 0L
-            }
+            if(refreshRequestId==request){refreshText="TIMEOUT_WAITING · hết thời hạn giao lệnh; chưa chứng minh lỗi GPS";refreshRequestId=0}
         }
     }
 
@@ -534,7 +538,7 @@ fun ParentDashboard(savedState: Bundle?, onMapViewCreated: (MapView) -> Unit) {
     val now = tick
     val dayEnd = selectedDayStart + 24L * 60 * 60 * 1000
     val dayEvents = remember(events, selectedDayStart) { events.filter { it.time in selectedDayStart until dayEnd } }
-    val visits = remember(dayEvents, selectedDayStart, tick) { toVisits(dayEvents, selectedDayStart, dayEnd) }
+    val visits = remember(events, selectedDayStart, tick) { toVisits(events, selectedDayStart, dayEnd) }
     val journeySummary = remember(dayEvents, visits, tick) { calculateJourneySummary(dayEvents, visits, selectedDayStart, dayEnd) }
     val isToday = selectedDayStart == startOfToday()
     val baseAssessment = assessConnection(
@@ -633,12 +637,13 @@ fun ParentDashboard(savedState: Bundle?, onMapViewCreated: (MapView) -> Unit) {
                 savedState = savedState,
                 onMapViewCreated = onMapViewCreated,
                 refreshText = refreshText,
-                refreshBusy = refreshRequestId > 0L,
+                refreshBusy = refreshRequestId > 0L && !refreshUiTimedOut,
                 onRefresh = {
-                    if (refreshRequestId > 0L) return@HomeScreen
+                    if (refreshRequestId > 0L && !refreshUiTimedOut) return@HomeScreen
                     firebaseError = null
                     val requestAt = ParentWakeBridge.newRequest(context)
                     refreshRequestId = requestAt
+                    refreshUiTimedOut=false
                     commandConfirmedFor = 0L
                     wakeProgressRank = 0
                     val parentUid = FirebaseAuth.getInstance().currentUser?.uid ?: run { refreshRequestId = 0L; refreshText = "Chưa đăng nhập Firebase"; return@HomeScreen }
@@ -749,7 +754,9 @@ fun ParentDashboard(savedState: Bundle?, onMapViewCreated: (MapView) -> Unit) {
                 fineLocationGranted = fineLocationGranted
             )
 
-            ParentTab.JOURNEY -> JourneyScreen(
+            ParentTab.JOURNEY -> Column {
+                Text(historyStatus,modifier=Modifier.padding(12.dp))
+                JourneyScreen(
                 modifier = Modifier.padding(pad),
                 selectedDayStart = selectedDayStart,
                 onSelectDay = { selectedDayStart = it },
@@ -773,6 +780,7 @@ fun ParentDashboard(savedState: Bundle?, onMapViewCreated: (MapView) -> Unit) {
                 onOpenPoint = { pLat, pLon -> openGoogleMapsPoint(context, pLat, pLon) }
             )
 
+            }
             ParentTab.HEALTH -> HealthScreen(
                 modifier = Modifier.padding(pad),
                 assessment = assessment,
@@ -1043,6 +1051,7 @@ private fun JourneyScreen(
                     HealthRow("Điểm dừng", summary.stops.toString())
                     HealthRow("Thời gian di chuyển", formatDuration(summary.movingMs))
                     HealthRow("Thời gian dừng", formatDuration(summary.stoppedMs))
+                    HealthRow("Khoảng trống GPS", "${summary.gaps} · GAP / NO_GPS; không nội suy")
                 }
             }
         }
@@ -1113,8 +1122,8 @@ private fun VisitCard(visit: UiVisit, openMap: (Double, Double) -> Unit) {
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
                 Text("Địa điểm ${visit.index}", color = Color.White, style = MaterialTheme.typography.titleMedium)
-                Text("Đến ${fmt(visit.arrival)} · Rời ${visit.departure?.let(::fmt) ?: "Hiện tại"}", color = Color(0xFFB6C8D2), style = MaterialTheme.typography.bodySmall)
-                Text("Dừng ${formatDuration(visit.durationMs)}${visit.accuracy?.let { " · ±${it.toInt()} m" } ?: ""}", color = Color(0xFF8CA3AF), style = MaterialTheme.typography.bodySmall)
+                Text("Đến ${fmt(visit.arrival)} · Rời ${visit.departure?.let(::fmt) ?: if(visit.completeEvidence) "Hiện tại" else "Chưa xác nhận"}", color = Color(0xFFB6C8D2), style = MaterialTheme.typography.bodySmall)
+                Text(if(visit.completeEvidence) "Dừng quan sát ${formatDuration(visit.durationMs)}" else "GAP / NO_GPS · chưa đủ dữ liệu xác nhận thời gian dừng", color = Color(0xFF8CA3AF), style = MaterialTheme.typography.bodySmall)
                 if (visit.lat != null && visit.lon != null) TextButton(onClick = { openMap(visit.lat, visit.lon) }, contentPadding = PaddingValues(0.dp)) { Text("Xem điểm này trên Google Maps") }
             }
         }
@@ -1194,7 +1203,7 @@ private fun HealthScreen(
             HealthCard("Survival / Android background") {
                 HealthRow("Danh tính Máy Cha", EnrollmentClient.status(LocalContext.current))
                 HealthRow("Cloudflare Worker", ParentWakeBridge.endpoint() ?: "Chưa cấu hình")
-                SurvivalHealth.fields.forEach { name -> HealthRow(name, survivalDiagnostics[name] ?: "Chưa xác định") }
+                SurvivalHealth.fields.forEach { name -> HealthRow(SurvivalHealth.label(name), survivalDiagnostics[name] ?: "Chưa xác định") }
                 Text("unusedAppRestricted cho biết tính năng tự thu hồi quyền/hibernation được bật, không chứng minh app hiện đang ngủ. Samsung Sleeping/Deep Sleeping: không có API công khai để xác nhận.", style = MaterialTheme.typography.bodySmall)
             }
         }
@@ -1324,8 +1333,12 @@ private fun mapKey(lat: Double?, lon: Double?, accuracy: Double, events: List<Ui
 @Suppress("DEPRECATION")
 private fun showMapData(map: MapLibreMap, lat: Double?, lon: Double?, accuracyM: Double, events: List<UiEvent>, showCurrent: Boolean) {
     map.clear()
-    val points = validRouteEvents(events).map { LatLng(it.lat!!, it.lon!!) }
-    if (points.size >= 2) map.addPolyline(PolylineOptions().addAll(points).width(5f))
+    val route = validRouteEvents(events)
+    val segments=JourneyPolicy.segments(route.map{HistoryPoint(it.documentId.ifBlank{"${it.type}|${it.id}|${it.time}"},it.time,it.lat!!,it.lon!!,it.accuracy?:150.0)})
+    val stride=maxOf(1,(route.size+1999)/2000) // render budget only; statistics use every record
+    val points=segments.flatten().map{LatLng(it.lat,it.lon)}
+    segments.forEach{segment->val points=segment.filterIndexed{index,_->index==0||index==segment.lastIndex||index%stride==0}.map{LatLng(it.lat,it.lon)}
+        if(points.size>=2)map.addPolyline(PolylineOptions().addAll(points).width(5f))}
     events.filter { it.type == "visit_start" && it.lat != null && it.lon != null }.sortedBy { it.time }.forEachIndexed { index, e ->
         map.addMarker(MarkerOptions().position(LatLng(e.lat!!, e.lon!!)).title("Điểm dừng ${index + 1}").snippet(fmt(e.time)))
     }
@@ -1404,42 +1417,29 @@ private fun assessConnection(
     }
 }
 
-private fun validRouteEvents(events: List<UiEvent>): List<UiEvent> {
-    val samples = events.filter { it.type == "location_sample" && it.lat != null && it.lon != null && (it.accuracy == null || it.accuracy <= 150.0) }.sortedBy { it.time }
-    if (samples.isNotEmpty()) return samples
-    return events.filter { it.type == "trip_point" && it.lat != null && it.lon != null && (it.accuracy == null || it.accuracy <= 150.0) }.sortedBy { it.time }
+internal fun validRouteEvents(events: List<UiEvent>): List<UiEvent> {
+    return events.filter { it.type in setOf("location_sample","trip_point") && it.lat!=null && it.lon!=null && it.lat.isFinite() && it.lon.isFinite() && it.lat in -90.0..90.0 && it.lon in -180.0..180.0 && (it.accuracy==null || it.accuracy in 0.0..150.0) }
+        .sortedWith(compareBy({it.time},{if(it.type=="location_sample")0 else 1},{it.documentId}))
+        .distinctBy { "${it.time}|${it.lat}|${it.lon}" } // raw + derived trip point may represent the same GPS fix
 }
 
-private fun mergeUiEvents(existing: List<UiEvent>, incoming: List<UiEvent>): List<UiEvent> {
+internal fun mergeUiEvents(existing: List<UiEvent>, incoming: List<UiEvent>): List<UiEvent> {
     if (incoming.isEmpty()) return existing
     val merged = LinkedHashMap<String, UiEvent>()
     (existing + incoming).forEach { e ->
-        val key = "${e.type}|${e.id}|${e.time}"
+        val key = e.documentId.ifBlank { "${e.type}|${e.id}|${e.time}" }
         merged[key] = e
     }
-    return merged.values.sortedBy { it.time }.takeLast(5000)
+    return merged.values.sortedWith(compareBy({it.time},{it.documentId}))
 }
 
-private fun calculateJourneySummary(events: List<UiEvent>, visits: List<UiVisit>, dayStart: Long, dayEnd: Long): JourneySummary {
+internal fun calculateJourneySummary(events: List<UiEvent>, visits: List<UiVisit>, dayStart: Long, dayEnd: Long): JourneySummary {
     val route = validRouteEvents(events)
-    var distance = 0.0
-    for (i in 1 until route.size) {
-        val a = route[i - 1]
-        val b = route[i]
-        distance += haversineMeters(a.lat!!, a.lon!!, b.lat!!, b.lon!!)
-    }
-    val tripStarts = events.filter { it.type == "trip_start" }.associateBy { it.id }
-    val tripEnds = events.filter { it.type == "trip_end" }.associateBy { it.id }
-    val now = System.currentTimeMillis()
-    var moving = 0L
-    tripStarts.values.forEach { start ->
-        val end = tripEnds[start.id]?.time ?: minOf(dayEnd, now)
-        val s = maxOf(start.time, dayStart)
-        val e = minOf(end, dayEnd, now)
-        if (e > s) moving += e - s
-    }
-    val stopped = visits.sumOf { it.durationMs }
-    return JourneySummary(distance, route.size, visits.size, moving, stopped)
+    val metrics=JourneyPolicy.metrics(route.map{HistoryPoint(it.documentId.ifBlank{"${it.type}|${it.id}|${it.time}"},it.time,it.lat!!,it.lon!!,it.accuracy?:150.0)})
+    val observedEnd=minOf(dayEnd,System.currentTimeMillis())
+    val boundaryGaps=if(route.isEmpty())1 else (if(route.first().time-dayStart>JourneyPolicy.GAP_MS)1 else 0)+(if(observedEnd-route.last().time>JourneyPolicy.GAP_MS)1 else 0)
+    return JourneySummary(metrics.distance,route.size,visits.size,metrics.movingMs,metrics.stoppedMs,metrics.gaps+boundaryGaps)
+
 }
 
 fun toVisits(events: List<UiEvent>, dayStart: Long, dayEnd: Long): List<UiVisit> {
@@ -1451,6 +1451,8 @@ fun toVisits(events: List<UiEvent>, dayStart: Long, dayEnd: Long): List<UiVisit>
         val rawEnd = ends[s.id]?.time ?: minOf(dayEnd, now)
         val visibleStart = maxOf(s.time, dayStart)
         val visibleEnd = minOf(rawEnd, dayEnd, now)
+        val fixes=validRouteEvents(events).filter{it.time in visibleStart..visibleEnd}
+        val observed=fixes.isNotEmpty() && fixes.first().time-visibleStart<=JourneyPolicy.GAP_MS && visibleEnd-fixes.last().time<=JourneyPolicy.GAP_MS && fixes.zipWithNext().none{(a,b)->b.time-a.time>JourneyPolicy.GAP_MS}
         if (visibleEnd <= visibleStart) null else UiVisit(
             index = index + 1,
             arrival = visibleStart,
@@ -1458,7 +1460,8 @@ fun toVisits(events: List<UiEvent>, dayStart: Long, dayEnd: Long): List<UiVisit>
             durationMs = visibleEnd - visibleStart,
             lat = s.lat,
             lon = s.lon,
-            accuracy = s.accuracy
+            accuracy = s.accuracy,
+            completeEvidence = observed
         )
     }
 }

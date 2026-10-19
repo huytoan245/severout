@@ -82,7 +82,7 @@ class CleanBaselineTest {
         assertFalse(DeviceMutationPolicy.select(remote,mapOf("refreshAckFor" to 200L,"refreshResult" to "locating")).containsKey("refreshResult"))
     }
     @Test fun matchingNewResultPassesGuard() {
-        val next=mapOf<String,Any?>("refreshCompletedFor" to 200L,"refreshResult" to "ok","locationTime" to 300L,"lastLat" to 20.0)
+        val next=mapOf<String,Any?>("refreshCompletedFor" to 200L,"refreshResult" to "ok","locationTime" to 300L,"lastLat" to 20.0,"lastLon" to 105.0)
         assertEquals(next,DeviceMutationPolicy.select(mapOf("refreshRequestedAt" to 200L,"locationTime" to 299L),next))
     }
     @Test fun locationOffAndMissingPermissionStopRecovery() {

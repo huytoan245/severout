@@ -14,6 +14,7 @@
         android:allowBackup="false"
         android:icon="@drawable/ic_guardian_shield"
         android:roundIcon="@drawable/ic_guardian_shield" android:theme="@style/Theme.FamilyChild" android:label="Family Safety">
+        <meta-data android:name="family.update_in_place" android:value="${familyUpdateInPlace}" />
         <activity android:name=".MainActivity" android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/>

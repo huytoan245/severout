@@ -9,6 +9,8 @@ plugins {
 val wakeWorkerUrl = providers.gradleProperty("wakeWorkerUrl").orElse(providers.environmentVariable("FAMILY_LOCATION_WAKE_WORKER_URL")).orElse("https://family-location-wake.huytoan0979928450.workers.dev").get()
 // Local private release input only. CI/debug APKs remain unprovisioned.
 val bootstrapToken = providers.environmentVariable("FAMILY_LOCATION_CHILD_BOOTSTRAP").orElse("").get()
+val updateInPlace = providers.gradleProperty("updateInPlace").orElse("false").get().toBoolean()
+require(!updateInPlace || bootstrapToken.isEmpty()) { "UPDATE_IN_PLACE must not contain bootstrap" }
 require(bootstrapToken.isEmpty() || (Regex("[A-Za-z0-9_-]{43}").matches(bootstrapToken) &&
     Base64.getUrlEncoder().withoutPadding().encodeToString(Base64.getUrlDecoder().decode(bootstrapToken)) == bootstrapToken)) { "Invalid role bootstrap format" }
 require(!(System.getenv("CI") == "true" && bootstrapToken.isNotEmpty())) { "Bootstrap injection is forbidden in CI" }
@@ -19,6 +21,7 @@ require(workerOrigin.scheme == "https" && !workerOrigin.host.isNullOrBlank() && 
 android {
     namespace = "com.family.child"
     compileSdk = 36
+    defaultConfig { manifestPlaceholders["familyUpdateInPlace"] = updateInPlace.toString() }
     defaultConfig { applicationId = "com.family.child"; minSdk = 26; targetSdk = 36; versionCode = 36; versionName = "2.3.2"; buildConfigField("String", "WAKE_WORKER_URL", "\"$wakeWorkerUrl\"") }
     buildTypes {
         getByName("debug") { buildConfigField("String", "BOOTSTRAP_TOKEN", "\"\"") }

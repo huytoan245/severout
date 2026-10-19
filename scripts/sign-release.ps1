@@ -6,6 +6,7 @@ param(
     [string]$UnsignedDirectory,
     [ValidateSet('2.3.0','2.3.1','2.3.2')][string]$Version = '2.3.0',
     [string]$BuildToolsVersion,
+    [switch]$UpdateInPlace,
     [switch]$CheckEnvironmentOnly
 )
 $ErrorActionPreference = 'Stop'
@@ -51,7 +52,11 @@ foreach ($app in @('Parent', 'Child')) {
     } finally { Remove-ReleaseNativeApkInput $inputFile }
 }
 if ($Version -ceq '2.3.1') { Assert-BootstrapApkPair $UnsignedDirectory }
-if ($Version -ceq '2.3.2') { Assert-BootstrapApkPairV232 $UnsignedDirectory }
+if($UpdateInPlace){
+    if($Version -cne '2.3.2'){throw 'UPDATE_IN_PLACE is supported only by v2.3.2 gate'}
+    . (Join-Path $PSScriptRoot 'UpdateRelease.Common.ps1')
+    Assert-UpdateInPlaceApkPair $UnsignedDirectory $tools.Aapt2
+}elseif ($Version -ceq '2.3.2') { Assert-BootstrapApkPairV232 $UnsignedDirectory }
 if ($CheckEnvironmentOnly) { Write-Output 'Environment/unsigned input gates PASS. No password read, keystore inspection/signing or Installable publication performed.'; return }
 $stage = Join-Path ([IO.Path]::GetTempPath()) ('family-location-sign-' + [guid]::NewGuid().ToString('N'))
 $previous = $env:FAMILY_LOCATION_KS_PASSWORD
@@ -83,7 +88,7 @@ try {
     $sums = for ($i = 0; $i -lt 2; $i++) { $evidence[$i].Sha256 + '  ' + $names[$i] }
     [IO.File]::WriteAllLines((Join-Path $stage 'SIGNED-SHA256SUMS.txt'), [string[]]$sums, [Text.UTF8Encoding]::new($false))
     Copy-Item -LiteralPath $docs -Destination (Join-Path $stage $docName)
-    $releaseInfo = @{ VersionName = $Version; VersionCode = $VersionCode; CertificateSha256 = $expected; BuildTools = $tools.Version; APKs = @($evidence | Select-Object Package, VersionName, VersionCode, CertificateSha256, Signature, Zipalign, Integrity, Sha256) }
+    $releaseInfo = @{ VersionName = $Version; VersionCode = $VersionCode; ReleaseMode = $(if($UpdateInPlace){'UPDATE_IN_PLACE'}else{'PROVISIONED_INSTALL'}); CertificateSha256 = $expected; BuildTools = $tools.Version; APKs = @($evidence | Select-Object Package, VersionName, VersionCode, CertificateSha256, Signature, Zipalign, Integrity, Sha256) }
     [IO.File]::WriteAllText((Join-Path $stage 'RELEASE-INFO.json'), ($releaseInfo | ConvertTo-Json -Depth 5), [Text.UTF8Encoding]::new($false))
     $zipNames = $names + @('SIGNED-SHA256SUMS.txt', $docName, 'Parent-signature.txt', 'Child-signature.txt', 'RELEASE-INFO.json')
     $releaseName = "Family-Location-v$Version-Release.zip"

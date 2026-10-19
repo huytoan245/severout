@@ -56,7 +56,7 @@ class ChildWakeMessagingService : FirebaseMessagingService() {
         prefs.edit().putBoolean("fcm_wake_notification_visible_v229", notificationVisible).apply()
 
         WakeTokenSyncWorker.schedule(app)
-        ChildDeviceWriter.write(mapOf("refreshReceivedFor" to requestId, "refreshReceivedAt" to now))
+        RefreshStatus.progress(app, requestId, com.family.core.RefreshStage.FCM_RECEIVED)
         UnusedAppRestrictionProbe.refresh(app)
 
         // A delivered HIGH FCM is an Android background-FGS exemption. A user
@@ -70,6 +70,7 @@ class ChildWakeMessagingService : FirebaseMessagingService() {
                 .putLong("fcm_wake_deprioritized_at_v229", now)
                 .apply()
             ServiceWatchdogWorker.requestImmediateRecovery(app, "fcm_deprioritized")
+            ChildDeviceWriter.write(mapOf("refreshReceivedFor" to requestId, "refreshStartErrorCode" to "FGS_START_DEFERRED"))
             return
         }
 

@@ -46,7 +46,9 @@ object ChildHttpsBridge {
         task({ ok, _ -> callback(ok) }) { token, uid ->
             if (uid != owner) return@task false
             val before = BoundedRest.call(DOC_URL, token) ?: return@task false
+            if (DeviceMutationPolicy.confirmed(BoundedRest.decode(before), fields.filterValues { it !is FieldValue })) return@task true
             val selected = DeviceMutationPolicy.select(BoundedRest.decode(before), fields.filterValues { it !is FieldValue })
+            if(fields.containsKey("locationTime") && !selected.containsKey("locationTime") && !selected.containsKey("refreshFixTime"))return@task false
             val finishing = fields.containsKey("refreshCompletedFor") || fields.containsKey("refreshFailedFor")
             if (selected.isEmpty() || (finishing && !selected.containsKey("refreshCompletedFor") && !selected.containsKey("refreshFailedFor"))) return@task false
             val time = before.optString("updateTime")

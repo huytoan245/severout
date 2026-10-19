@@ -1,5 +1,12 @@
 import { ApiError, GoogleApi } from './google.js';
 export const TTL = 15 * 60000;
+export function evidenceStage(d,id){
+  if(d.refreshCompletedFor===id && d.locationTime>=id && Number.isFinite(d.lastLat) && Number.isFinite(d.lastLon))return 'SERVER_CONFIRMED';
+  if(d.refreshFailedFor===id)return 'FAILED';
+  for(const [key,stage] of [['refreshPersistedFor','LOCAL_PERSISTED'],['refreshValidatedFor','GPS_VALIDATED'],['refreshLocatingFor','GPS_ACQUIRING'],['refreshServiceFor','SERVICE_STARTED'],['refreshAckFor','SERVICE_STARTED'],['refreshReceivedFor','FCM_RECEIVED']])if(d[key]===id)return stage;
+  if(d.wakeDispatchFor===id && d.wakeDispatchResult==='sent')return 'DISPATCHED';
+  return 'REQUESTED';
+}
 export function validateRequest(b, now = Date.now()) {
   if (!b || Object.keys(b).some(k => !['deviceId', 'requestId', 'requestedAt'].includes(k)) || b.deviceId !== 'child-01' || !Number.isSafeInteger(b.requestedAt) || b.requestId !== String(b.requestedAt) || b.requestedAt <= 0) throw new ApiError('invalid_request', 400);
   if (b.requestedAt > now + 30000 || now >= b.requestedAt + TTL) throw new ApiError('expired_request', 410);
@@ -37,7 +44,7 @@ export class WakeCoordinator {
       } catch (e) { return Response.json({ error: e instanceof ApiError ? e.code : 'backend_unavailable' }, { status: e instanceof ApiError ? e.status : 503, headers: { 'Cache-Control': 'no-store', ...(e.status === 429 ? { 'Retry-After': '60' } : {}) } }); }
     });
   }
-  response(s) { return Response.json({ requestId: String(s.id), status: s.status, retryAt: s.nextAt || 0, ...(s.status === 'failed' ? { error: s.error || 'wake_failed' } : {}) }, { status: s.status === 'failed' ? 502 : 200, headers: { 'Cache-Control': 'no-store' } }); }
+  response(s) { return Response.json({ requestId: String(s.id), status: s.status, stage:s.stage || (s.status==='sent'?'DISPATCHED':'REQUESTED'), retryAt: s.nextAt || 0, ...(s.status === 'failed' ? { error: s.error || 'wake_failed' } : {}) }, { status: s.status === 'failed' ? 502 : 200, headers: { 'Cache-Control': 'no-store' } }); }
   async alarm() { return this.locked(async () => { const s = await this.ctx.storage.get('request'); if (s && !['completed', 'received', 'expired', 'failed', 'sent_unconfirmed'].includes(s.status)) await this.attempt(s); }); }
   async attempt(s) {
     const now = this.clock();
@@ -51,6 +58,7 @@ export class WakeCoordinator {
       const family = await this.api.readFamily();
       if (!family.parentUid || !family.childUid || family.parentUid !== s.parentUid || family.epoch !== s.epoch) throw new ApiError('family_changed', 403);
       const d = await this.api.readDevice();
+      s.stage=evidenceStage(d,s.id);
       if ((family.schemaVersion === 232 && d.refreshEpoch !== s.epoch) || d.refreshRequestedAt !== s.id || d.refreshRequestedBy !== family.parentUid || d.refreshExpiresAt !== s.expires) throw new ApiError('command_mismatch', 409);
       if (d.refreshCompletedFor === s.id || d.refreshFailedFor === s.id) { s.status = 'completed'; await this.finish(s); return; }
       if (d.refreshReceivedFor === s.id) { s.status = 'received'; await this.finish(s); return; }
@@ -78,6 +86,7 @@ export class WakeCoordinator {
         s.status = 'sent'; await this.ctx.storage.put('request', s);
       }
       await this.api.patchIfCurrent(s.id, { wakeDispatchFor: s.id, wakeDispatchAt: this.clock(), wakeDispatchResult: 'sent', wakeDispatchMessageId: s.messageId || '' });
+      s.stage='DISPATCHED';
       // Bounded receipt/token-rotation checks after FCM accepts a send. There is
       // no Firestore trigger on Spark, so a late rotated token needs this path.
       s.status = s.attempts >= 8 ? 'sent_unconfirmed' : 'sent';

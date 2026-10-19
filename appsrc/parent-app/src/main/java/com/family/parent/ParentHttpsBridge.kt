@@ -34,7 +34,8 @@ object ParentHttpsBridge {
         val accuracy: Double? = null,
         val id: String = "",
         val offlineSince: Long = 0L,
-        val durationMs: Long = 0L
+        val durationMs: Long = 0L,
+        val documentId: String = ""
     )
 
     data class DeviceState(
@@ -104,7 +105,8 @@ object ParentHttpsBridge {
         val locationReminderExpiresAt: Long = 0L,
         val locationReminderAckFor: Long = 0L,
         val locationReminderAckAt: Long = 0L,
-        val locationReminderResult: String? = null
+        val locationReminderResult: String? = null,
+        val refreshEvidence: Map<String,Any?> = emptyMap()
     )
 
     fun patch(fields: Map<String, Any?>, callback: (Boolean, String?) -> Unit) {
@@ -249,7 +251,8 @@ object ParentHttpsBridge {
                                 locationReminderExpiresAt = long(fields, "locationReminderExpiresAt"),
                                 locationReminderAckFor = long(fields, "locationReminderAckFor"),
                                 locationReminderAckAt = long(fields, "locationReminderAckAt"),
-                                locationReminderResult = string(fields, "locationReminderResult")
+                                locationReminderResult = string(fields, "locationReminderResult"),
+                                refreshEvidence=fields.keys().asSequence().associateWith{key->val value=fields.getJSONObject(key);when{value.has("integerValue")->value.getString("integerValue").toLongOrNull();value.has("doubleValue")->value.getDouble("doubleValue");value.has("booleanValue")->value.getBoolean("booleanValue");else->value.optString("stringValue","")}}
                             )
                             connection.disconnect()
                             post { callback(state, null) }
@@ -268,74 +271,42 @@ object ParentHttpsBridge {
     }
 
     fun readEvents(dayStart: Long, dayEnd: Long, callback: (List<RemoteEvent>?, String?) -> Unit) {
-        withToken(
-            onToken = { token ->
-                submit({ callback(null, "transport_busy") }) {
-                    try {
-                        val url = "https://firestore.googleapis.com/v1/projects/family-location-884e5/databases/(default)/documents/devices/child-01:runQuery"
-                        val query = JSONObject().put("structuredQuery", JSONObject()
-                            .put("from", org.json.JSONArray().put(JSONObject().put("collectionId", "events")))
-                            .put("where", JSONObject().put("compositeFilter", JSONObject()
-                                .put("op", "AND")
-                                .put("filters", org.json.JSONArray()
-                                    .put(JSONObject().put("fieldFilter", JSONObject()
-                                        .put("field", JSONObject().put("fieldPath", "time"))
-                                        .put("op", "GREATER_THAN_OR_EQUAL")
-                                        .put("value", JSONObject().put("integerValue", dayStart.toString()))))
-                                    .put(JSONObject().put("fieldFilter", JSONObject()
-                                        .put("field", JSONObject().put("fieldPath", "time"))
-                                        .put("op", "LESS_THAN")
-                                        .put("value", JSONObject().put("integerValue", dayEnd.toString())))))))
-                            .put("orderBy", org.json.JSONArray().put(JSONObject()
-                                .put("field", JSONObject().put("fieldPath", "time"))
-                                .put("direction", "ASCENDING")))
-                            .put("limit", 5000))
-                        val connection = (URL(url).openConnection() as HttpURLConnection).apply {
-                            requestMethod = "POST"
-                            instanceFollowRedirects = false
-                            setRequestProperty("Connection", "close")
-                            useCaches = false
-                            connectTimeout = 8_000
-                            readTimeout = 12_000
-                            doOutput = true
-                            setRequestProperty("Authorization", "Bearer $token")
-                            setRequestProperty("Content-Type", "application/json; charset=UTF-8")
-                            setRequestProperty("Accept", "application/json")
-                        }
-                        connection.outputStream.use { it.write(query.toString().toByteArray(Charsets.UTF_8)) }
-                        val code = connection.responseCode
-                        if (code in 200..299) {
-                            val body = connection.inputStream.bufferedReader().use { it.readText() }
-                            val rows = org.json.JSONArray(body)
-                            val result = mutableListOf<RemoteEvent>()
-                            for (i in 0 until rows.length()) {
-                                val doc = rows.optJSONObject(i)?.optJSONObject("document") ?: continue
-                                val fields = doc.optJSONObject("fields") ?: continue
-                                result += RemoteEvent(
-                                    type = string(fields, "type") ?: "",
-                                    time = long(fields, "time"),
-                                    lat = number(fields, "lat"),
-                                    lon = number(fields, "lon"),
-                                    accuracy = number(fields, "accuracy"),
-                                    id = string(fields, "id") ?: "",
-                                    offlineSince = long(fields, "offlineSince"),
-                                    durationMs = long(fields, "durationMs")
-                                )
-                            }
-                            connection.disconnect()
-                            post { callback(result, null) }
-                        } else {
-                            val error = readError(connection)
-                            connection.disconnect()
-                            post { callback(null, error ?: "HTTP $code") }
-                        }
-                    } catch (e: Exception) {
-                        post { callback(null, e.javaClass.simpleName + (e.message?.let { ": $it" } ?: "")) }
-                    }
+        withToken(onToken={token->submit({callback(null,"transport_busy")}){
+            try {
+                val all=LinkedHashMap<String,RemoteEvent>()
+                fun page(reverse:Boolean,cursor:org.json.JSONArray?):Pair<List<JSONObject>,org.json.JSONArray?> {
+                    val filters=org.json.JSONArray().put(JSONObject().put("fieldFilter",JSONObject().put("field",JSONObject().put("fieldPath","time")).put("op",if(reverse)"LESS_THAN" else "GREATER_THAN_OR_EQUAL").put("value",JSONObject().put("integerValue",dayStart.toString()))))
+                    if(!reverse)filters.put(JSONObject().put("fieldFilter",JSONObject().put("field",JSONObject().put("fieldPath","time")).put("op","LESS_THAN").put("value",JSONObject().put("integerValue",dayEnd.toString()))))
+                    val order=org.json.JSONArray()
+                    for(field in listOf("time","__name__"))order.put(JSONObject().put("field",JSONObject().put("fieldPath",field)).put("direction",if(reverse)"DESCENDING" else "ASCENDING"))
+                    val q=JSONObject().put("from",org.json.JSONArray().put(JSONObject().put("collectionId","events"))).put("where",JSONObject().put("compositeFilter",JSONObject().put("op","AND").put("filters",filters))).put("orderBy",order).put("limit",500)
+                    if(cursor!=null)q.put("startAt",JSONObject().put("values",cursor).put("before",false))
+                    val connection=(URL(DOC_URL+":runQuery").openConnection() as HttpURLConnection).apply{requestMethod="POST";connectTimeout=8_000;readTimeout=12_000;instanceFollowRedirects=false;doOutput=true;setRequestProperty("Authorization","Bearer $token");setRequestProperty("Content-Type","application/json")}
+                    val docs=try{connection.outputStream.use{it.write(JSONObject().put("structuredQuery",q).toString().toByteArray(Charsets.UTF_8))}
+                        check(connection.responseCode in 200..299){"history_page_unconfirmed"}
+                        val rows=org.json.JSONArray(connection.inputStream.bufferedReader().use{it.readText()})
+                        (0 until rows.length()).mapNotNull{rows.optJSONObject(it)?.optJSONObject("document")}
+                    }finally{connection.disconnect()}
+                    val last=docs.lastOrNull()
+                    val next=last?.let{org.json.JSONArray().put(it.getJSONObject("fields").getJSONObject("time")).put(JSONObject().put("referenceValue",it.getString("name")))}
+                    return docs to next
                 }
-            },
-            onError = { post { callback(null, it) } }
-        )
+                for(reverse in listOf(false,true)){
+                    var cursor:org.json.JSONArray?=null
+                    do {
+                        val (docs,next)=page(reverse,cursor)
+                        var anchor=false
+                        for(doc in docs){val f=doc.getJSONObject("fields");val name=doc.getString("name");val type=string(f,"type")?:""
+                            anchor=anchor || type in setOf("visit_start","trip_start")
+                            all[name]=RemoteEvent(type,long(f,"time"),number(f,"lat"),number(f,"lon"),number(f,"accuracy"),string(f,"id")?:"",long(f,"offlineSince"),long(f,"durationMs"),name.substringAfterLast('/'))
+                        }
+                        if(docs.size<500 || (reverse && anchor))break
+                        check(next!=null && next.toString()!=cursor?.toString()){"history_cursor_stalled"};cursor=next
+                    }while(true)
+                }
+                post{callback(all.values.sortedWith(compareBy({it.time},{it.documentId})),null)}
+            }catch(_:Exception){post{callback(null,"history_incomplete")}}
+        }},onError={post{callback(null,it)}})
     }
 
     private fun withToken(onToken: (String) -> Unit, onError: (String) -> Unit) {

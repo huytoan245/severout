@@ -142,7 +142,7 @@ try {
     # keystore or installable APK; this tests failure/control flow, not real signing.
     $copy = Join-Path $root 'repo'
     foreach ($dir in @('scripts', 'docs', 'appsrc', 'out')) { New-Item -ItemType Directory -Path (Join-Path $copy $dir) | Out-Null }
-    foreach ($name in @('ReleaseSigning.Common.ps1', 'Bootstrap.Common.ps1', 'Bootstrap.V232.Common.ps1', 'sign-release.ps1', 'validate-signed-release.ps1')) { Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) -Destination (Join-Path $copy 'scripts') }
+    foreach ($name in @('ReleaseSigning.Common.ps1', 'Bootstrap.Common.ps1', 'Bootstrap.V232.Common.ps1', 'UpdateRelease.Common.ps1', 'sign-release.ps1', 'validate-signed-release.ps1')) { Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) -Destination (Join-Path $copy 'scripts') }
     # Control-flow fixtures cannot represent real provisioned DEX; separately
     # test the actual bootstrap scanner in test-bootstrap.ps1 with random inputs.
     [IO.File]::AppendAllText((Join-Path $copy 'scripts/Bootstrap.Common.ps1'), "`nfunction Assert-BootstrapApkPair { }", [Text.UTF8Encoding]::new($false))
@@ -160,6 +160,7 @@ function Invoke-ReleaseTool {
     if ($Executable.EndsWith('aapt2.exe')) {
         $app = if ($apk.Contains('Parent')) { 'parent' } else { 'child' }
         $output = "package: name='com.family.$app' versionCode='34' versionName='2.3.0'"
+        if($Arguments -contains 'xmltree'){$output='android:name="family.update_in_place"' + "`n" + 'android:value=(type 0x12)0xffffffff'}
     } elseif ($Executable.EndsWith('zipalign.exe')) {
         if ($Arguments[0] -eq '-c') {
             if ($env:FAMILY_SIGNING_TEST_MODE -eq 'child-align' -and $apk.Contains('Child') -and $apk.Contains('Installable')) { $exitCode = 1 }
@@ -258,6 +259,25 @@ function Assert-ReleaseArchiveReadable { }
     & (Join-Path $copy 'scripts/validate-signed-release.ps1') -Version 2.3.2 -JavaHome $javaDir -AndroidSdk $sdkDir -Directory $out | Out-Null
     Check $true 'v232 independent paired ZIP/hash/version/signature gate passes'
     Check ((Get-FileHash -LiteralPath $fakeStore).Hash -ceq $storeHash) 'v232 read-only signer fixture preserved'
+    # UPDATE_IN_PLACE uses the same pair/certificate gates, and separately verifies runtime mode.
+    foreach($name in @('Family-Parent-v2.3.2-Installable.apk','Family-Child-v2.3.2-Installable.apk','Family-Location-v2.3.2-Release.zip')){Remove-Item -LiteralPath (Join-Path $out $name)}
+    $updateGate=Get-Content -LiteralPath (Join-Path $out 'AUTOMATED-GATE.json') -Raw | ConvertFrom-Json
+    $updateGate|Add-Member -NotePropertyName ReleaseMode -NotePropertyValue UPDATE_IN_PLACE
+    $updateGate|ConvertTo-Json -Depth 5|Set-Content -LiteralPath (Join-Path $out 'AUTOMATED-GATE.json')
+    $updateMarker=@{mode='UPDATE_IN_PLACE';versionName='2.3.2';versionCode=36;bootstrapIncluded=$false;apks=@{}}
+    foreach($app in @('Parent','Child')){$updateMarker.apks[$app]=(Get-FileHash -LiteralPath (Join-Path $out "Family-$app-v2.3.2-unsigned.apk")).Hash.ToLowerInvariant()}
+    $updateMarker|ConvertTo-Json -Depth 5|Set-Content -LiteralPath (Join-Path $out 'UPDATE-IN-PLACE.json')
+    foreach($mode in @('child-sign','child-cert','child-verify','child-align')){
+        $env:FAMILY_SIGNING_TEST_MODE=$mode
+        Reject { & (Join-Path $copy 'scripts/sign-release.ps1') -Version 2.3.2 -UpdateInPlace -KeystorePath $fakeStore -JavaHome $javaDir -AndroidSdk $sdkDir -UnsignedDirectory $out } "UPDATE_IN_PLACE preserves $mode rejection"
+        Check (@(Get-ChildItem -LiteralPath $out -Filter '*v2.3.2-Installable.apk').Count -eq 0) "UPDATE_IN_PLACE publishes neither APK on $mode"
+    }
+    $env:FAMILY_SIGNING_TEST_MODE='pass'
+    & (Join-Path $copy 'scripts/sign-release.ps1') -Version 2.3.2 -UpdateInPlace -KeystorePath $fakeStore -JavaHome $javaDir -AndroidSdk $sdkDir -UnsignedDirectory $out|Out-Null
+    Check (@(Get-ChildItem -LiteralPath $out -Filter '*v2.3.2-Installable.apk').Count -eq 2) 'UPDATE_IN_PLACE pair signs with unchanged mock signer'
+    $updateMarker.bootstrapIncluded=$true
+    $updateMarker|ConvertTo-Json -Depth 5|Set-Content -LiteralPath (Join-Path $out 'UPDATE-IN-PLACE.json')
+    Reject { & (Join-Path $copy 'scripts/sign-release.ps1') -Version 2.3.2 -UpdateInPlace -KeystorePath $fakeStore -JavaHome $javaDir -AndroidSdk $sdkDir -UnsignedDirectory $out -CheckEnvironmentOnly } 'UPDATE_IN_PLACE cannot reuse a provisioned bootstrap artifact'
     # Reload real helpers, then test inspection with an isolated mocked native reader.
     . (Join-Path $PSScriptRoot 'ReleaseSigning.Common.ps1')
     function Invoke-ReleaseTool {

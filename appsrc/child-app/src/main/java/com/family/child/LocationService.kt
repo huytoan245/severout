@@ -39,7 +39,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 class LocationService : Service() {
     private lateinit var client: FusedLocationProviderClient
-    private val engine = VisitEngine()
+    private val engine = VisitEngine(EngineConfig(sameAreaM=60.0,leaveConfirmM=90.0,leaveConfirmMs=30_000L,arrivalRadiusM=40.0,minTripPointDistanceM=25.0))
     private val cloud by lazy { FirebaseFirestore.getInstance() }
     private val local by lazy { PendingStore(this) }
     private val io = Executors.newSingleThreadExecutor()
@@ -85,6 +85,14 @@ class LocationService : Service() {
     private var serviceStartCount = 0
     @Volatile private var lastLocalServiceHeartbeatAt = 0L
     @Volatile private var lastGpsCallbackAt = 0L
+    @Volatile private var lastValidGpsAt = 0L
+    @Volatile private var lastGpsRejectedAt = 0L
+    @Volatile private var lastGpsErrorCode = ""
+    private val acquisitionLease = AcquisitionLease()
+    private var acquisitionDeadline: GpsDeadline? = null
+    private var trackingMoving = true
+    private var lastMovingAt = 0L
+    private var trackingChangedAt = 0L
     @Volatile private var lastCloudHeartbeatAttemptAt = 0L
     @Volatile private var pendingEventCount = 0
     private var syncSessionActive = false
@@ -212,10 +220,11 @@ class LocationService : Service() {
             local.meta("engine_checkpoint")?.let { checkpoint ->
                 val latest = JournalCheckpoint.restore(engine, checkpoint)
                 lastAcceptedGpsTime = latest.timeMs
+                lastValidGpsAt = latest.timeMs
                 lastAccepted = Location("journal").apply { latitude = latest.point.lat; longitude = latest.point.lon; accuracy = latest.point.accuracyM.toFloat(); time = latest.timeMs }
             }
             background {
-                pendingEventCount = try { local.batch(PENDING_REPORT_LIMIT).size } catch (_: Exception) { 0 }
+                pendingEventCount = try { local.count() } catch (_: Exception) { 0 }
             }
             val prefs = getSharedPreferences("tracking_diag", MODE_PRIVATE)
             local.meta(KEY_NETWORK_OFFLINE_SINCE)?.toLongOrNull()?.let { prefs.edit().putLong(KEY_NETWORK_OFFLINE_SINCE,it).apply() }
@@ -242,6 +251,7 @@ class LocationService : Service() {
     private fun ensureAuthenticated() {
         if (destroyed) return
         val auth = FirebaseAuth.getInstance()
+        if(auth.currentUser==null && com.family.enrollment.EnrollmentMode.updateOnly(this)){publishLocalStatus("existing_enrollment_required");return}
         if (auth.currentUser != null) {
             if (commandListener == null) onAuthenticated()
             return
@@ -381,10 +391,10 @@ class LocationService : Service() {
         if (trackingActive) return
         if (!hasFineLocation()) { publishLocalStatus("location_permission_missing"); return }
         if (!isLocationEnabled()) { publishLocalStatus("location_off"); return }
-        val request = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, TRACK_INTERVAL_MS)
+        val request = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, JourneyPolicy.interval(trackingMoving))
             .setMinUpdateIntervalMillis(TRACK_FASTEST_MS)
-            .setMinUpdateDistanceMeters(TRACK_DISTANCE_M)
-            .setMaxUpdateDelayMillis(TRACK_MAX_DELAY_MS)
+            .setMinUpdateDistanceMeters(0f)
+            .setMaxUpdateDelayMillis(if(trackingMoving) 60_000L else 120_000L)
             .setWaitForAccurateLocation(false)
             .build()
         try {
@@ -503,7 +513,7 @@ class LocationService : Service() {
         val terminal = JSONObject(local.meta("refresh_result") ?: "{}")
         if (terminal.optLong("request") >= ts) { retryRefreshResult(); return }
         if (ts <= prefs.getLong("refresh_delivered_for_v2210", 0L)) return
-        if (activeRefreshId == ts && acquiring) return
+        if (activeRefreshId == ts) return
         if (activeRefreshId > ts) return
         try { local.putMeta("refresh_pending", ts.toString()) } catch (e: Exception) {
             publishLocalStatus("refresh_store_failed:${e.javaClass.simpleName}"); return
@@ -511,7 +521,7 @@ class LocationService : Service() {
         activeRefreshId = ts
         publishLocalStatus("refresh_received_$transport")
         if (System.currentTimeMillis() - ts > REFRESH_TTL_MS || ts > System.currentTimeMillis() + 60_000L) {
-            publishRefreshFailure(ts, "Yêu cầu đã hết hạn"); return
+            publishRefreshFailure(ts, "Yêu cầu đã hết hạn", "REQUEST_EXPIRED"); return
         }
         publishRefreshAck(ts)
         handler.post { if (!destroyed && activeRefreshId == ts) requestImmediate(ts) }
@@ -616,17 +626,7 @@ class LocationService : Service() {
 
     private fun publishRefreshAck(requestId: Long) {
         if (!cloudIdentityReady()) return
-        val now = System.currentTimeMillis()
-        val payload = mapOf<String, Any?>(
-            "refreshAckFor" to requestId,
-            "refreshAckAt" to now,
-            "refreshResult" to "locating",
-            "refreshServiceFor" to requestId,
-            "refreshServiceAt" to now,
-            "refreshReceivedFor" to requestId,
-            "refreshReceivedAt" to now
-        )
-        ChildDeviceWriter.write(payload) { ok -> if (ok) publishLocalStatus("refresh_ack_confirmed") }
+        RefreshStatus.progress(this,requestId,RefreshStage.SERVICE_STARTED)
     }
 
     private fun handleCandidate(location: Location, refreshFor: Long?) {
@@ -634,9 +634,11 @@ class LocationService : Service() {
         if (destroyed || (refreshFor != null && refreshFor != activeRefreshId)) return
         val problem = LocationPolicy.problem(location, lastAccepted, lastAcceptedGpsTime)
         if (problem != null) {
+            lastGpsRejectedAt=System.currentTimeMillis();lastGpsErrorCode="GPS_REJECTED"
             if (refreshFor != null) publishRefreshFailure(refreshFor, problem)
             return
         }
+        if(refreshFor!=null && location.time<refreshFor){publishRefreshFailure(refreshFor,"GPS cũ hơn yêu cầu", "STALE_FIX");return}
         if (location.time < lastAcceptedGpsTime) {
             if (refreshFor != null) publishRefreshFailure(refreshFor, "Tọa độ GPS không mới hơn dữ liệu đã lưu")
             return
@@ -651,6 +653,8 @@ class LocationService : Service() {
                 return
             }
         }
+        lastValidGpsAt=location.time;lastGpsErrorCode=""
+        if(refreshFor!=null)RefreshStatus.progress(this,refreshFor,RefreshStage.GPS_VALIDATED)
         handle(location, refreshFor)
     }
 
@@ -672,13 +676,16 @@ class LocationService : Service() {
         val sample = Sample(
             GeoPoint(l.latitude, l.longitude, l.accuracy.toDouble()),
             sampleTime,
-            moving = (l.hasSpeed() && l.speed > 0.8f) || (lastAccepted?.distanceTo(l) ?: 0f) >= 35f
+            moving = JourneyPolicy.moving(if(l.hasSpeed())l.speed else null,lastAccepted?.distanceTo(l)?:0f)
         )
         val before = engine.snapshot()
         val sampleId = EventIdentity.sampleId(sampleTime, l.latitude, l.longitude)
         val duplicate = lastAcceptedGpsTime == sampleTime && lastAccepted?.latitude == l.latitude && lastAccepted?.longitude == l.longitude
         val events = if (duplicate) emptyList() else if (engine.currentVisit() == null && engine.currentTrip() == null) engine.seedVisit(sample) else engine.accept(sample)
         val journal = events.map { eventJson(it).toString() }.toMutableList()
+        if(!duplicate && lastAcceptedGpsTime>0 && sampleTime-lastAcceptedGpsTime>JourneyPolicy.GAP_MS)journal+=JSONObject()
+            .put("type","gps_gap").put("id","gap-$lastAcceptedGpsTime-$sampleTime").put("time",sampleTime)
+            .put("gapStart",lastAcceptedGpsTime).put("durationMs",sampleTime-lastAcceptedGpsTime).put("reason","NO_GPS").toString()
         if (!duplicate) journal += JSONObject().put("type", "location_sample").put("id", sampleId)
             .put("lat", l.latitude).put("lon", l.longitude).put("accuracy", l.accuracy.toDouble()).put("time", sampleTime).toString()
         try {
@@ -686,11 +693,15 @@ class LocationService : Service() {
         } catch (e: Exception) {
             engine.restoreSnapshot(before)
             publishLocalStatus("journal_write_failed:${e.javaClass.simpleName}")
-            if (refreshFor != null) publishRefreshFailure(refreshFor, "Không lưu được nhật ký trên máy")
+            if (refreshFor != null) publishRefreshFailure(refreshFor, "Không lưu được nhật ký trên máy", "JOURNAL_WRITE_FAILED")
             return
         }
         pendingEventCount = local.count()
         lastAccepted = Location(l); lastAcceptedGpsTime = sampleTime
+        if(sample.moving) lastMovingAt=now
+        val shouldMove=sample.moving || now-lastMovingAt<120_000L
+        if(shouldMove!=trackingMoving && now-trackingChangedAt>=60_000L){trackingMoving=shouldMove;trackingChangedAt=now
+            handler.post { if(!destroyed){client.removeLocationUpdates(callback);trackingActive=false;requestTracking()} }}
         RecoveryGeofenceManager.update(this, l)
 
         val diag = diagnosticFields(now)
@@ -708,7 +719,9 @@ class LocationService : Service() {
         )
         payload.putAll(diag)
         if (refreshFor != null) {
+            RefreshStatus.progress(this,refreshFor,RefreshStage.LOCAL_PERSISTED)
             payload["refreshCompletedFor"] = refreshFor
+            payload["refreshFixTime"] = sampleTime
             payload["refreshCompletedAt"] = now
             payload["refreshResult"] = "ok"
         }
@@ -763,7 +776,7 @@ class LocationService : Service() {
     private fun flushPending() {
         if (!cloudIdentityReady() || !flushing.compareAndSet(false, true)) return
         background {
-            pendingEventCount = try { local.batch(PENDING_REPORT_LIMIT).size } catch (_: Exception) { pendingEventCount }
+            pendingEventCount = try { local.count() } catch (_: Exception) { pendingEventCount }
             if (pendingEventCount > 0 && !syncSessionActive) {
                 syncSessionActive = true
                 syncSessionInitialPending = pendingEventCount
@@ -834,10 +847,13 @@ class LocationService : Service() {
         handler.postDelayed({ fallback("timeout") }, EVENT_FIRESTORE_TIMEOUT_MS)
     }
 
-    private fun requestImmediate(refreshFor: Long?) {
+    private fun requestImmediate(refreshFor: Long?, attempt: Int = 0) {
         if (destroyed) return
-        if (acquiring && refreshFor == null) return
+        if (refreshFor == null && (acquiring || activeRefreshId>0)) return
+        if (refreshFor!=null && refreshFor!=activeRefreshId)return
         if (acquiring) acquisitionToken?.cancel()
+        acquisitionDeadline?.cancel()
+        val lease=acquisitionLease.next()
         lastFreshFixAttemptElapsed = SystemClock.elapsedRealtime()
         val token = CancellationTokenSource()
         acquisitionToken = token
@@ -846,16 +862,30 @@ class LocationService : Service() {
             val progress = mapOf<String, Any?>("refreshLocatingFor" to refreshFor, "refreshLocatingAt" to System.currentTimeMillis())
             ChildDeviceWriter.write(progress)
         }
-        fun finished() { if (acquisitionToken === token) { acquiring = false; acquisitionToken = null } }
+        val timeout=Runnable {
+            if(!acquisitionLease.finish(lease)||destroyed)return@Runnable
+            token.cancel();acquiring=false;acquisitionToken=null
+            if(attempt<1 && (refreshFor==null || activeRefreshId==refreshFor))requestImmediate(refreshFor,attempt+1)
+            else if(refreshFor!=null)publishRefreshFailure(refreshFor,"Không nhận được GPS trong thời hạn", "GPS_TIMEOUT")
+        }
+        val deadline=GpsDeadline({r,delay->handler.postDelayed(r,delay)},{r->handler.removeCallbacks(r)},{timeout.run()})
+        acquisitionDeadline=deadline
+        fun finished():Boolean {if(!deadline.finish()||!acquisitionLease.finish(lease))return false;acquiring=false;acquisitionToken=null;return true}
+        fun noFix(code:String,message:String){
+            lastGpsErrorCode=code
+            if(attempt<1 && (refreshFor==null || activeRefreshId==refreshFor))handler.postDelayed({requestImmediate(refreshFor,attempt+1)},1_000L)
+            else if(refreshFor!=null)publishRefreshFailure(refreshFor,message,code)
+            else publishCloudStatus("no_fix",code)
+        }
         if (!hasFineLocation()) {
             finished()
-            if (refreshFor != null) publishRefreshFailure(refreshFor, "Không có quyền vị trí chính xác")
+            if (refreshFor != null) publishRefreshFailure(refreshFor, "Không có quyền vị trí chính xác", "PERMISSION_DENIED")
             publishCloudStatus("permission_missing", "Không có quyền vị trí chính xác")
             return
         }
         if (!isLocationEnabled()) {
             finished()
-            if (refreshFor != null) publishRefreshFailure(refreshFor, "Vị trí trên điện thoại đang tắt")
+            if (refreshFor != null) publishRefreshFailure(refreshFor, "Vị trí trên điện thoại đang tắt", "LOCATION_DISABLED")
             publishCloudStatus("location_off", "Vị trí trên điện thoại đang tắt")
             return
         }
@@ -865,35 +895,37 @@ class LocationService : Service() {
             .setDurationMillis(25_000L)
             .build()
         try {
+            deadline.arm()
             client.getCurrentLocation(request, token.token)
                 .addOnSuccessListener { l ->
-                    if (destroyed || token.token.isCancellationRequested) return@addOnSuccessListener
-                    finished()
+                    if (destroyed || token.token.isCancellationRequested || !finished()) return@addOnSuccessListener
+                    lastGpsCallbackAt=System.currentTimeMillis()
                     if (l != null) handleCandidate(l, refreshFor)
-                    else if (refreshFor != null) publishRefreshFailure(refreshFor, "Chưa lấy được GPS mới")
-                    else publishCloudStatus("no_fix", "Chưa lấy được GPS mới")
+                    else noFix("GPS_NULL","GPS không trả về vị trí mới")
                 }
                 .addOnFailureListener { e ->
-                    if (destroyed || token.token.isCancellationRequested) return@addOnFailureListener
-                    finished()
-                    if (refreshFor != null) publishRefreshFailure(refreshFor, "GPS lỗi: ${e.javaClass.simpleName}")
-                    else publishCloudStatus("location_error", e.javaClass.simpleName)
+                    if (destroyed || token.token.isCancellationRequested || !finished()) return@addOnFailureListener
+                    lastGpsCallbackAt=System.currentTimeMillis()
+                    noFix("GPS_ANDROID_ERROR","GPS lỗi: ${e.javaClass.simpleName}")
                 }
         } catch (e: SecurityException) {
             finished()
-            if (refreshFor != null) publishRefreshFailure(refreshFor, "Không đủ quyền vị trí")
+            if (refreshFor != null) publishRefreshFailure(refreshFor, "Không đủ quyền vị trí", "PERMISSION_DENIED")
             publishLocalStatus("current_security:${e.javaClass.simpleName}")
+        } catch (_: Exception) {
+            if(finished())noFix("GPS_ANDROID_ERROR","Android không tiếp nhận yêu cầu GPS")
         }
     }
 
-    private fun publishRefreshFailure(requestId: Long, message: String) {
-        if (Looper.myLooper() != journalThread.looper) { journal { publishRefreshFailure(requestId, message) }; return }
+    private fun publishRefreshFailure(requestId: Long, message: String, code: String = "GPS_REJECTED") {
+        if (Looper.myLooper() != journalThread.looper) { journal { publishRefreshFailure(requestId, message, code) }; return }
         if (destroyed || (activeRefreshId > 0L && requestId != activeRefreshId)) return
         val now = System.currentTimeMillis()
         val payload = mutableMapOf<String, Any?>(
             "refreshFailedFor" to requestId,
             "refreshFailedAt" to now,
             "refreshResult" to "failed",
+            "refreshErrorCode" to code,
             "lastError" to message
         )
         payload.putAll(diagnosticFields(now))
@@ -991,6 +1023,9 @@ class LocationService : Service() {
             "serviceRestartCount" to (serviceStartCount - 1).coerceAtLeast(0),
             "lastLocalServiceHeartbeatAt" to lastLocalServiceHeartbeatAt,
             "lastGpsCallbackAt" to lastGpsCallbackAt,
+            "lastValidGpsAt" to lastValidGpsAt,
+            "lastGpsRejectedAt" to lastGpsRejectedAt,
+            "lastGpsErrorCode" to lastGpsErrorCode,
             "lastCloudHeartbeatAttemptAt" to lastCloudHeartbeatAttemptAt,
             "lastCloudHeartbeatSuccessAt" to getSharedPreferences("tracking_diag", MODE_PRIVATE).getLong("last_cloud_heartbeat_success_v2210", 0L),
             "processExitReason" to getSharedPreferences("tracking_diag", MODE_PRIVATE).getInt("last_process_exit_reason", 0),
