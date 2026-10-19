@@ -64,11 +64,13 @@ object RecoveryStarter {
             .putBoolean("recovery_start_battery_exempt_v229", batteryExempt)
             .apply()
 
-        val blocked = com.family.core.RecoveryPolicy.blockedReason(fine, background, locationEnabled, restricted)
+        val existingForeground = LocationService.running && now-prefs.getLong(ServiceWatchdogWorker.KEY_LAST_LOCAL_HEARTBEAT_AT,0L) in 0L..150_000L
+        val blocked = com.family.core.RecoveryPolicy.blockedReason(fine, background, locationEnabled, restricted, existingForeground)
         if (blocked != null) {
             prefs.edit()
                 .putString("recovery_start_result_v229", "blocked:$blocked")
                 .apply()
+            RefreshStatus.progress(app,refreshRequestId,com.family.core.RefreshStage.FAILED,blocked.uppercase(),"Không thể khởi chạy dịch vụ: $blocked")
             return false
         }
 
@@ -91,6 +93,7 @@ object RecoveryStarter {
                 .putString("recovery_start_result_v229", "failed:${e.javaClass.simpleName}")
                 .putLong("recovery_start_failed_at_v229", now)
                 .apply()
+            RefreshStatus.progress(app,refreshRequestId,com.family.core.RefreshStage.FAILED,"FGS_START_REJECTED","Android từ chối khởi chạy dịch vụ")
             false
         }
     }

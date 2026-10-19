@@ -30,7 +30,7 @@ ui = contains(child/'MainActivity.kt', ['Điện thoại của bạn đang đư�
 for forbidden in ['GPS','MỞ CÀI ĐẶT QUYỀN','BẬT VỊ TRÍ','MỞ DANH SÁCH KHÔNG BAO GIỜ TỰ NGHỈ']:
     assert forbidden not in ui, forbidden
 assert 'pin yếu' not in s.lower()
-contains(parent/'MainActivity.kt', ['refreshExpiresAt','Máy Con chưa phản hồi sau 45 giây','refreshLocatingFor','LOCATION_REMINDER_DELAY_MS = 6 * 60 * 60_000L'])
+contains(parent/'MainActivity.kt', ['refreshExpiresAt','TIMEOUT_WAITING','refreshLocatingFor','LOCATION_REMINDER_DELAY_MS = 6 * 60 * 60_000L'])
 contains(root/'appsrc/parent-app/src/main/AndroidManifest.xml', ['android:label="Kết Nối"'])
 tips = (child/'WisdomStore.kt').read_text(encoding='utf-8')
 import re

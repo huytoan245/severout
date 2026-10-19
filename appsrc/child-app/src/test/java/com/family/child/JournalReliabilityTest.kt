@@ -49,6 +49,21 @@ class JournalReliabilityTest {
         assertEquals(2, db.count()); assertNotEquals(EventIdentity.documentId(JSONObject(event(0, 1000))), EventIdentity.documentId(JSONObject(event(1, 1000))))
         db.close()
     }
+    @Test fun offlineQueueBeyondFiveThousandSurvivesReopenAndRetriesWithoutLossOrDuplicates(){
+        val rows=(0 until 6001).map{event(it)}
+        PendingStore(context).useStore{it.commitSample(rows,"checkpoint-across-midnight");assertEquals(6001,it.count())}
+        PendingStore(context).useStore{db->
+            assertEquals("checkpoint-across-midnight",db.meta("engine_checkpoint"));db.commitSample(rows,"restored")
+            assertEquals(6001,db.count())
+            val first=db.batch(1).single();val outcomes=mutableListOf<Boolean>()
+            val failed=ConfirmedWrite({cb->cb(false)}){outcomes+=it;if(it)db.delete(first.localId)}
+            failed.primary(false);assertEquals(6001,db.count())
+            val confirmed=ConfirmedWrite({cb->cb(true)}){outcomes+=it;if(it)db.delete(first.localId)}
+            confirmed.primary(false);confirmed.primary(true)
+            assertEquals(6000,db.count());assertEquals(listOf(false,true),outcomes)
+        }
+        PendingStore(context).useStore{assertEquals(6000,it.count())}
+    }
     @Test fun v1MigrationPreservesRowsAndLegacyRemoteIdentity() {
         context.getDatabasePath("location.db").parentFile!!.mkdirs()
         val legacy = SQLiteDatabase.openOrCreateDatabase(context.getDatabasePath("location.db"), null)

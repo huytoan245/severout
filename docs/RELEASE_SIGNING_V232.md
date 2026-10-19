@@ -2,6 +2,8 @@
 
 Pinned signer SHA-256: `62b909ff3c5e6b56565cfe2814913778acdf694f32a042f12bc05c35404ed63f`
 
+For already enrolled devices, use the tested `UPDATE_IN_PLACE` artifact and explicit `-UpdateInPlace` signing switch. It verifies empty bootstrap build input, manifest mode and pair hashes, then retains every existing signer/package/version/apksigner/16KiB gate. Runtime requires the existing UID/key and cannot reset/rebind. See [GPS/Journey update instructions](V232_RELIABLE_GPS_JOURNEY.md). The bootstrap gates below still apply to separate fresh-install/recovery releases.
+
 Existing release JKS/alias are unchanged:
 - C:\Users\Admin\Documents\FamilyLocation-Signing\Family-Location-Release-2026.jks
 - family-location-release-2026

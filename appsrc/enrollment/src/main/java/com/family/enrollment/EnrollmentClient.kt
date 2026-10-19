@@ -18,6 +18,7 @@ object EnrollmentClient {
     fun status(context: Context): String = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString("membership_status", "Connecting") ?: "Connecting"
     fun registered(context: Context, role: String): Boolean {
         val uid = FirebaseAuth.getInstance().currentUser?.uid ?: return false
+        if(EnrollmentMode.updateOnly(context) && !DeviceIdentity.exists())return false
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         return prefs.getInt("binding_protocol", 0) == 232 && prefs.getString("registered_$role", null) == uid && prefs.getString("registered_key", null) == DeviceIdentity.publicKey()
     }
@@ -25,6 +26,7 @@ object EnrollmentClient {
         return EnrollmentManager.ensure(context, base, role, bootstrap, force)
     }
     @Synchronized fun signed(context: Context, base: String, role: String, purpose: String, payload: JSONObject, bootstrap: String = ""): JSONObject {
+        if(EnrollmentMode.updateOnly(context) && (!DeviceIdentity.exists() || purpose=="rebind" || bootstrap.isNotEmpty()))throw EnrollmentFailure("existing_enrollment_required",403)
         val user = FirebaseAuth.getInstance().currentUser ?: throw EnrollmentFailure("no_auth", 503)
         val uid = user.uid
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)

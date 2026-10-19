@@ -36,7 +36,7 @@ class VisitEngine(private val cfg: EngineConfig = EngineConfig()) {
         val v = visit
         if (v != null) {
             val d = Geo.distanceM(v.center, sample.point)
-            if (d <= cfg.sameAreaM) {
+            if (d <= cfg.sameAreaM && !sample.moving) {
                 departureCandidateSince = null
                 return out
             }

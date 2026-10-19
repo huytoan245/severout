@@ -12,6 +12,9 @@ internal object EnrollmentManager {
     fun ensure(context: Context, base: String, role: String, bootstrap: String, force: Boolean, allowAuthReset: Boolean = true, allowKeyReset: Boolean = true): String {
         require(role in listOf("parent", "child"))
         val auth = FirebaseAuth.getInstance()
+        val updateOnly=EnrollmentMode.updateOnly(context)
+        // UPDATE_IN_PLACE never creates an identity/key or falls into recovery.
+        if(updateOnly && (auth.currentUser==null || !DeviceIdentity.exists()))throw EnrollmentFailure("existing_enrollment_required",403)
         if (auth.currentUser == null) Tasks.await(auth.signInAnonymously(), 20, TimeUnit.SECONDS)
         val uid = auth.currentUser?.uid ?: throw EnrollmentFailure("no_auth", 503)
         val prefs = context.getSharedPreferences(EnrollmentClient.PREFS, Context.MODE_PRIVATE)
@@ -19,7 +22,9 @@ internal object EnrollmentManager {
         if (!force && prefs.getInt("binding_protocol", 0) == 232 && prefs.getString("registered_$role", null) == uid && prefs.getString("registered_key", null) == key) return uid
         val material = DeviceRecoveryBindingProvider.material(context, role)
         val result = try {
-            if (EnrollmentJournal(prefs, role).pendingRebind(uid, System.currentTimeMillis())) {
+            if(updateOnly){
+                EnrollmentClient.signed(context,base,role,"register",payload(material))
+            } else if (EnrollmentJournal(prefs, role).pendingRebind(uid, System.currentTimeMillis())) {
                 RebindManager.recover(context, base, role, material)
             } else try {
                 EnrollmentClient.signed(context, base, role, "register", payload(material), bootstrap)
@@ -29,14 +34,14 @@ internal object EnrollmentManager {
         } catch (e: EnrollmentFailure) {
             // A restored/retired anonymous identity may get a fresh UID once.
             // The stable binding and new proof still decide server authorization.
-            if (e.code in listOf("retired_identity", "fresh_identity_required") && allowAuthReset) {
+            if (!updateOnly && e.code in listOf("retired_identity", "fresh_identity_required") && allowAuthReset) {
                 prefs.edit().remove("registered_$role").remove("registered_key").commit()
                 EnrollmentJournal(prefs, role).clear()
                 auth.signOut()
                 Tasks.await(auth.signInAnonymously(), 20, TimeUnit.SECONDS)
                 return ensure(context, base, role, bootstrap, true, false, allowKeyReset)
             }
-            if (e.code == "fresh_key_required" && allowKeyReset) {
+            if (!updateOnly && e.code == "fresh_key_required" && allowKeyReset) {
                 prefs.edit().remove("registered_$role").remove("registered_key").commit()
                 EnrollmentJournal(prefs, role).clear()
                 DeviceIdentity.renewInstallationKey()

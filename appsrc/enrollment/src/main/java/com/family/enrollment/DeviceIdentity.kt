@@ -39,6 +39,7 @@ internal object DeviceIdentity {
     // This is an installation key in Android Keystore, independent of the
     // unchanged release APK signing certificate/JKS. Never export private material.
     private const val ALIAS = "family-location-enrollment-v1"
+    fun exists(): Boolean = KeyStore.getInstance("AndroidKeyStore").apply{load(null)}.containsAlias(ALIAS)
     @Synchronized private fun entry(): KeyStore.PrivateKeyEntry {
         val store = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
         if (!store.containsAlias(ALIAS)) {

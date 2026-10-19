@@ -1,7 +1,7 @@
-name: Build Family Location v2.3.2 Permanent Reinstall Binding
+name: Build Family Location v2.3.2 Reliable GPS Journey
 on:
   pull_request:
-    branches: [codex/v231-zero-setup-pairing]
+    branches: [codex/v231-zero-setup-pairing, codex/v232-permanent-reinstall-binding]
   workflow_dispatch:
 permissions:
   contents: read
@@ -25,13 +25,14 @@ jobs:
       - name: Worker auth/retry/runtime and Firestore rules regression
         working-directory: cloudflare-wake
         run: |
+          mkdir -p ../out
           npm ci --ignore-scripts
-          npm test
+          npm test | tee ../out/worker-tests.log
           npm run check
           npm run dry-run
-          npm run test:runtime
+          npm run test:runtime | tee ../out/runtime-smoke.log
           node render-rules.mjs --output .wrangler/test-fixture.rules
-          npx --yes firebase-tools@15.32.1 emulators:exec --only firestore --project demo-family-location-wake --config firebase-test.json 'node test/firestore-rules.mjs'
+          npx --yes firebase-tools@15.32.1 emulators:exec --only firestore --project demo-family-location-wake --config firebase-test.json 'node test/firestore-rules.mjs' | tee ../out/rules-emulator.log
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -50,16 +51,18 @@ jobs:
       - name: Existing signer recovery and paired signing gate regression (no private key)
         shell: pwsh
         run: |
-          ./scripts/test-release-signing.ps1 -JavaHome $env:JAVA_HOME
+          ./scripts/test-release-signing.ps1 -JavaHome $env:JAVA_HOME | Tee-Object -FilePath out/signing-regression.log
           ./scripts/test-bootstrap.ps1
           ./scripts/test-bootstrap-v232.ps1
       - name: Core, journal/token, Android build and full lint
         working-directory: appsrc
-        run: gradle -I ../scripts/capture-build-tools.gradle captureSigningBuildTools -PfamilySigningMetadata="$GITHUB_WORKSPACE/out/ANDROID-BUILD-TOOLS.json" :core:coreSelfCheck :core:scenarioCheck :enrollment:testDebugUnitTest :child-app:testDebugUnitTest :parent-app:assembleRelease :child-app:assembleRelease :enrollment:lintRelease :parent-app:lintRelease :child-app:lintRelease --console=plain --stacktrace
+        run: gradle -PupdateInPlace=true -I ../scripts/capture-build-tools.gradle captureSigningBuildTools -PfamilySigningMetadata="$GITHUB_WORKSPACE/out/ANDROID-BUILD-TOOLS.json" :core:coreSelfCheck :core:scenarioCheck :enrollment:testDebugUnitTest :child-app:testDebugUnitTest :parent-app:testDebugUnitTest :parent-app:assembleRelease :child-app:assembleRelease :enrollment:lintRelease :parent-app:lintRelease :child-app:lintRelease --console=plain --stacktrace | tee ../out/android-build.log
+      - name: Collect tested UPDATE_IN_PLACE pair (no bootstrap)
+        run: python3 -X utf8 scripts/prepare-update-candidate.py --build-root appsrc --evidence-root out --output-directory out
       - name: Verify APK alignment and collect UNPROVISIONED review APKs (signing blocked)
         run: |
           mkdir -p out/cloudflare-wake
-          echo 'UNPROVISIONED REVIEW ONLY: no bootstrap capabilities; signing gate blocks these APKs.' > out/BOOTSTRAP-STATUS.txt
+          echo 'UPDATE_IN_PLACE: no bootstrap; existing UID/key required. Use the explicit -UpdateInPlace signing gate.' > out/BOOTSTRAP-STATUS.txt
           cp appsrc/parent-app/build/outputs/apk/release/parent-app-release-unsigned.apk out/Family-Parent-v2.3.2-unsigned.apk
           cp appsrc/child-app/build/outputs/apk/release/child-app-release-unsigned.apk out/Family-Child-v2.3.2-unsigned.apk
           "$ANDROID_HOME/build-tools/36.0.0/zipalign" -c -P 16 4 out/Family-Parent-v2.3.2-unsigned.apk
@@ -81,5 +84,6 @@ jobs:
           path: |
             appsrc/enrollment/build/reports/tests/
             appsrc/child-app/build/reports/tests/
+            appsrc/parent-app/build/reports/tests/
             appsrc/child-app/build/reports/lint-results-release.*
             appsrc/parent-app/build/reports/lint-results-release.*

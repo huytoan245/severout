@@ -1,5 +1,5 @@
 import { initializeTestEnvironment, assertSucceeds, assertFails } from '@firebase/rules-unit-testing';
-import { doc, setDoc, getDoc, deleteDoc } from 'firebase/firestore';
+import { doc, setDoc, getDoc, deleteDoc,writeBatch,query,where,orderBy,documentId,limit,startAfter,collection,getDocs } from 'firebase/firestore';
 import { readFileSync } from 'node:fs';
 import assert from 'node:assert/strict';
 import { randomBytes,createHash } from 'node:crypto';
@@ -97,5 +97,20 @@ try {
   await pass(setDoc(doc(newChild,path),{refreshServiceFor:now+1},{merge:true}));
   const deviceAfter=await api.readDocument(api.docUrl());assert.equal(deviceAfter.fcmToken,'');assert.equal(deviceAfter.fcmTokenOwnerUid,'');assert.equal(deviceAfter.fcmTokenGeneration,101);assert.equal(deviceAfter.lastLat,20);count++;
   await pass(getDoc(doc(newParent,path+'/events/id')));
+  // Real daily pagination: >5,000 records, equal timestamps and multiple days.
+  const day=Date.UTC(2025,0,1),dayMs=86400000,total=7400;
+  await env.withSecurityRulesDisabled(async context=>{
+    const db=context.firestore();for(let offset=0;offset<total;offset+=400){const batch=writeBatch(db);
+      for(let i=offset;i<Math.min(offset+400,total);i++)batch.set(doc(db,path+'/events/history-'+String(i).padStart(6,'0')),{type:'location_sample',id:'history-'+i,time:day+(i<6500?0:dayMs)+Math.floor(i/3)*1000,lat:20,lon:105,accuracy:5});
+      await batch.commit();}
+  });
+  async function readDay(start,end){let after=null;const ids=[];do{
+    let constraints=[where('time','>=',start),where('time','<',end),orderBy('time'),orderBy(documentId()),limit(500)];if(after)constraints.push(startAfter(after));
+    const page=await assertSucceeds(getDocs(query(collection(newParent,path+'/events'),...constraints)));count++;
+    ids.push(...page.docs.map(d=>d.id));if(page.size<500)break;after=page.docs.at(-1);
+  }while(true);assert.equal(new Set(ids).size,ids.length);count++;return ids;}
+  assert.equal((await readDay(day,day+dayMs)).length,6500);count++;
+  assert.equal((await readDay(day+dayMs,day+2*dayMs)).length,900);count++;
+  await deny(getDocs(query(collection(stranger,path+'/events'),where('time','>=',day),where('time','<',day+dayMs),orderBy('time'),limit(500))));
   console.log(`PASS: ${count} actual Firestore emulator security-rule assertions. Fixture UIDs/project only; no production writes.`);
 } finally { await env.cleanup(); }
