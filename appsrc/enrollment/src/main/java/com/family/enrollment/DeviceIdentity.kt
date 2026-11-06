@@ -40,6 +40,15 @@ internal object DeviceIdentity {
     // unchanged release APK signing certificate/JKS. Never export private material.
     private const val ALIAS = "family-location-enrollment-v1"
     fun exists(): Boolean = KeyStore.getInstance("AndroidKeyStore").apply{load(null)}.containsAlias(ALIAS)
+    /** Recovery must read the entry as well; a provider failure is UNKNOWN, never permission to replace a key. */
+    fun recoveryEntryPresent():Boolean {
+        val store=KeyStore.getInstance("AndroidKeyStore").apply{load(null)}
+        return store.getEntry(ALIAS,null)!=null || store.containsAlias(ALIAS)
+    }
+    @Synchronized fun createRecoveryKeyIfMissing():String {
+        check(!recoveryEntryPresent()){"existing_key_preserved"}
+        return publicKey()
+    }
     @Synchronized private fun entry(create: Boolean = true): KeyStore.PrivateKeyEntry {
         val store = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
         if (!store.containsAlias(ALIAS)) {

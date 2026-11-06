@@ -1,6 +1,6 @@
 # v2.3.3 Parent-only recovery — PREPARED, NOT APPLIED
 
-`device_key_missing · RECOVERY_REQUIRED` is confirmed by the user on Parent v2.3.3. In its UPDATE enrollment path this means the installation alias is absent; it does **not** establish whether Firebase Auth UID is also absent. Repeated retry cannot recreate that key. The user confirms the original phone/profile, no factory reset. Phone-local Auth and same-device binding match remain UNKNOWN until the dedicated inspection runs.
+`device_key_missing · RECOVERY_REQUIRED` is confirmed by the user on Parent v2.3.3. In its UPDATE enrollment path this means UPDATE did not find the installation alias; it does **not** establish whether Firebase Auth UID is also absent. Recovery additionally reads the existing entry directly; a provider/read exception is UNKNOWN and stops before Auth/key creation, never permission to replace a key. Repeated retry cannot recreate that key. The user confirms the original phone/profile, no factory reset. Phone-local Auth and same-device binding match remain UNKNOWN until the dedicated inspection runs.
 
 Read-only production backup on06/11/2026: schema232/epoch3, Parent rebind generation0, both roles/key fields and Parent stable binding present; old Parent Auth account exists and is not disabled. Family revision2026-10-16T15:03:46.713235Z is unchanged. Protected family/device/audit snapshots are outside Git/releases. No UID, token, material, pepper or private key is published. No production rebind/deployment/Auth mutation has occurred.
 

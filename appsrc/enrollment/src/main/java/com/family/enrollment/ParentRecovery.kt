@@ -28,7 +28,7 @@ object ParentRecovery {
     fun inspect(c:Context):Inspection {
         checkMode(c)
         val user=waitAuth()
-        val exists=try{DeviceIdentity.exists()}catch(_:Exception){return Inspection(if(user==null)"NOT_OBSERVED_AFTER_WAIT" else "PRESENT","UNKNOWN","UNKNOWN","keystore_read_failed")}
+        val exists=try{DeviceIdentity.recoveryEntryPresent()}catch(_:Exception){return Inspection(if(user==null)"NOT_OBSERVED_AFTER_WAIT" else "PRESENT","UNKNOWN","UNKNOWN","keystore_read_failed")}
         val usable=if(exists)try{DeviceIdentity.verifyExistingKey()}catch(_:Exception){false}else false
         val material=DeviceRecoveryBindingProvider.material(c,"parent")
         val raw=JSONObject().put("format","FL233-PARENT-INSPECTION-1").put("role","parent").put("package","com.family.parent")
@@ -74,14 +74,14 @@ object ParentRecovery {
         val auth=FirebaseAuth.getInstance();waitAuth()
         check(!report.getBoolean("keyPresent")){"existing_key_preserved"}
         val identity=if(expired){
-            check(auth.currentUser?.uid==p.getString("newUid",null) && DeviceIdentity.exists() && DeviceIdentity.existingPublicKey()==p.getString("newKey",null)){"identity_changed"}
+            check(auth.currentUser?.uid==p.getString("newUid",null) && DeviceIdentity.recoveryEntryPresent() && DeviceIdentity.existingPublicKey()==p.getString("newKey",null)){"identity_changed"}
             p.getString("newUid",null)!! to p.getString("newKey",null)!!
         }else RecoveryIdentityFlow(
             {RecoveryIdentityRecord(p.contains("phase"),p.getString("originalUid",null)?.takeIf{it.isNotEmpty()},p.getString("newUid",null),p.getBoolean("keyRequested",false),p.getString("newKey",null))},
             {record->check(p.edit().putString("phase","PREPARING").putString("originalUid",record.originalUid?:"").putString("newUid",record.newUid)
                 .putBoolean("keyRequested",record.keyRequested).putString("newKey",record.newKey).commit())},
-            {auth.currentUser?.uid},DeviceIdentity::exists,DeviceIdentity::existingPublicKey,
-            {auth.signOut();Tasks.await(auth.signInAnonymously(),20,TimeUnit.SECONDS);Unit},DeviceIdentity::publicKey
+            {auth.currentUser?.uid},DeviceIdentity::recoveryEntryPresent,DeviceIdentity::existingPublicKey,
+            {auth.signOut();Tasks.await(auth.signInAnonymously(),20,TimeUnit.SECONDS);Unit},DeviceIdentity::createRecoveryKeyIfMissing
         ).resume(if(report.isNull("uid"))null else report.getString("uid"),approval.getString("oldParentUidHash"))
         val user=auth.currentUser?:error("auth_creation_unresolved_stop");check(user.isAnonymous && user.uid==identity.first){"identity_changed"}
         val publicKey=identity.second

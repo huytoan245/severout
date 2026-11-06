@@ -11,8 +11,8 @@ import org.robolectric.annotation.Config
 class RecoveryIdentityFlowTest {
     private class Fixture {
         var state=RecoveryIdentityRecord();var current:String?="old";var key:String?=null;var authCreates=0;var keyCreates=0
-        var loseAuthResponse=false;var authNeverCompletes=false;var loseKeyResponse=false;var refuseSave=false
-        fun flow()=RecoveryIdentityFlow({state},{check(!refuseSave);state=it},{current},{key!=null},{key!!},{
+        var loseAuthResponse=false;var authNeverCompletes=false;var loseKeyResponse=false;var refuseSave=false;var keyReadFails=false
+        fun flow()=RecoveryIdentityFlow({state},{check(!refuseSave);state=it},{current},{check(!keyReadFails){"keystore_unavailable"};key!=null},{key!!},{
             authCreates++;current=null
             if(!authNeverCompletes)current="fresh"
             if(loseAuthResponse||authNeverCompletes)error("timeout")
@@ -49,5 +49,9 @@ class RecoveryIdentityFlowTest {
     @Test fun genuinelyAbsentUidIsNotAssumedToBeTheOldParent(){
         val f=Fixture();f.current=null
         assertEquals("fresh",f.flow().resume(null,RecoveryEnvelope.hash("old")).first);assertEquals(1,f.authCreates)
+    }
+    @Test fun keystoreReadFailureCannotBeTreatedAsMissingOrCreateAuth(){
+        val f=Fixture();f.keyReadFails=true;assertTrue(runCatching{f.run()}.isFailure)
+        assertEquals(0,f.authCreates);assertEquals(0,f.keyCreates);assertFalse(f.state.started)
     }
 }
