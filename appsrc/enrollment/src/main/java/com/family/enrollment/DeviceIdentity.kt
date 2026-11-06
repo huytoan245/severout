@@ -54,6 +54,12 @@ internal object DeviceIdentity {
     }
     fun publicKey(): String = EnrollmentProof.base64(entry().certificate.publicKey.encoded)
     fun existingPublicKey():String=EnrollmentProof.base64(entry(false).certificate.publicKey.encoded)
+    fun verifyExistingKey():Boolean {
+        val existing=entry(false)
+        val message=ByteArray(32).also{java.security.SecureRandom().nextBytes(it)}
+        val proof=Signature.getInstance("SHA256withECDSA").run{initSign(existing.privateKey);update(message);sign()}
+        return Signature.getInstance("SHA256withECDSA").run{initVerify(existing.certificate.publicKey);update(message);verify(proof)}
+    }
     /** Called only on explicit server rejection of a reused/retired installation key. */
     @Synchronized fun renewInstallationKey() {
         KeyStore.getInstance("AndroidKeyStore").apply { load(null); deleteEntry(ALIAS) }

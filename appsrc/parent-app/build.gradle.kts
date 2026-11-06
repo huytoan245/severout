@@ -10,6 +10,9 @@ val wakeWorkerUrl = providers.gradleProperty("wakeWorkerUrl").orElse(providers.e
 // Local private release input only. CI/debug APKs remain unprovisioned.
 val bootstrapToken = providers.environmentVariable("FAMILY_LOCATION_PARENT_BOOTSTRAP").orElse("").get()
 val updateInPlace = providers.gradleProperty("updateInPlace").orElse("true").get().toBoolean()
+val parentRecovery = providers.gradleProperty("parentRecovery").orElse("false").get().toBoolean()
+val recoveryOperatorKey = providers.environmentVariable("FAMILY_RECOVERY_OPERATOR_PUBLIC_KEY").orElse("").get()
+require(!parentRecovery || (updateInPlace && bootstrapToken.isEmpty() && recoveryOperatorKey.matches(Regex("[A-Za-z0-9+/=]{300,1000}")))) { "Recovery requires UPDATE identity safeguards, no bootstrap and an operator encryption/approval public key" }
 require(!updateInPlace || bootstrapToken.isEmpty()) { "UPDATE_IN_PLACE must not contain bootstrap" }
 require(bootstrapToken.isEmpty() || (Regex("[A-Za-z0-9_-]{43}").matches(bootstrapToken) &&
     Base64.getUrlEncoder().withoutPadding().encodeToString(Base64.getUrlDecoder().decode(bootstrapToken)) == bootstrapToken)) { "Invalid role bootstrap format" }
@@ -19,6 +22,7 @@ require(workerOrigin.scheme == "https" && !workerOrigin.host.isNullOrBlank() && 
     workerOrigin.rawQuery == null && workerOrigin.rawFragment == null && (workerOrigin.path.isNullOrEmpty() || workerOrigin.path == "/")) { "Worker URL must be a public HTTPS origin without endpoint/path" }
 
 android {
+    if(parentRecovery) sourceSets.getByName("main").manifest.srcFile("src/recovery/AndroidManifest.xml")
     namespace = "com.family.parent"
     compileSdk = 36
     defaultConfig {
@@ -27,6 +31,7 @@ android {
         minSdk = 26
         targetSdk = 36
         buildConfigField("String", "WAKE_WORKER_URL", "\"$wakeWorkerUrl\"")
+        buildConfigField("String", "RECOVERY_OPERATOR_KEY", "\"${if(parentRecovery) recoveryOperatorKey else ""}\"")
         versionCode = 37
         versionName = "2.3.3"
     }

@@ -54,28 +54,23 @@ jobs:
           ./scripts/test-release-signing.ps1 -JavaHome $env:JAVA_HOME | Tee-Object -FilePath out/signing-regression.log
           ./scripts/test-bootstrap.ps1
           ./scripts/test-bootstrap-v232.ps1
-      - name: Core, journal/token, Android build and full lint
-        working-directory: appsrc
-        run: gradle -PupdateInPlace=true -I ../scripts/capture-build-tools.gradle captureSigningBuildTools -PfamilySigningMetadata="$GITHUB_WORKSPACE/out/ANDROID-BUILD-TOOLS.json" :core:coreSelfCheck :core:scenarioCheck :enrollment:testDebugUnitTest :child-app:testDebugUnitTest :parent-app:testDebugUnitTest :parent-app:assembleRelease :child-app:assembleRelease :enrollment:lintRelease :parent-app:lintRelease :child-app:lintRelease --console=plain --stacktrace | tee ../out/android-build.log
-      - name: Collect tested UPDATE_IN_PLACE pair (no bootstrap)
-        run: python3 -X utf8 scripts/prepare-update-candidate.py --version 2.3.3 --build-root appsrc --evidence-root out --output-directory out
-      - name: Verify APK alignment and collect UNPROVISIONED review APKs (signing blocked)
+      - name: Ephemeral CI operator transport key (not a release signer)
         run: |
-          mkdir -p out/cloudflare-wake
-          echo 'UPDATE_IN_PLACE: no bootstrap; existing UID/key required. Use the explicit -UpdateInPlace signing gate.' > out/BOOTSTRAP-STATUS.txt
-          cp appsrc/parent-app/build/outputs/apk/release/parent-app-release-unsigned.apk out/Family-Parent-v2.3.3-unsigned.apk
-          cp appsrc/child-app/build/outputs/apk/release/child-app-release-unsigned.apk out/Family-Child-v2.3.3-unsigned.apk
-          "$ANDROID_HOME/build-tools/36.0.0/zipalign" -c -P 16 4 out/Family-Parent-v2.3.3-unsigned.apk
-          "$ANDROID_HOME/build-tools/36.0.0/zipalign" -c -P 16 4 out/Family-Child-v2.3.3-unsigned.apk
-          cp -r cloudflare-wake/src cloudflare-wake/test out/cloudflare-wake/
-          cp cloudflare-wake/package*.json cloudflare-wake/wrangler.jsonc cloudflare-wake/firebase-test.json cloudflare-wake/render-rules.mjs cloudflare-wake/bootstrap-plan.mjs cloudflare-wake/recovery-plan.mjs cloudflare-wake/migration-plan-v232.mjs out/cloudflare-wake/
-          cp -r docs scripts out/
-          git archive --format=zip --output=out/Family-Location-v2.3.3-Source.zip HEAD
-          sha256sum out/*.apk out/*Source.zip > out/SHA256SUMS.txt
+          openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out "$RUNNER_TEMP/recovery-fixture.pem" 2>/dev/null
+          openssl pkey -in "$RUNNER_TEMP/recovery-fixture.pem" -pubout -outform DER | base64 -w0 > "$RUNNER_TEMP/operator-public.txt"
+          echo "FAMILY_RECOVERY_OPERATOR_PUBLIC_KEY=$(cat "$RUNNER_TEMP/operator-public.txt")" >> "$GITHUB_ENV"
+      - name: Parent Recovery tests, build and lint; Child regression only
+        working-directory: appsrc
+        run: gradle -PupdateInPlace=true -PparentRecovery=true -I ../scripts/capture-build-tools.gradle captureSigningBuildTools -PfamilySigningMetadata="$GITHUB_WORKSPACE/out/ANDROID-BUILD-TOOLS.json" :core:coreSelfCheck :core:scenarioCheck :enrollment:testDebugUnitTest :child-app:testDebugUnitTest :parent-app:testDebugUnitTest :parent-app:assembleRelease :enrollment:lintRelease :parent-app:lintRelease :child-app:lintRelease --console=plain --stacktrace | tee ../out/android-build.log
+      - name: Collect only separately gated Parent Recovery (CI key, no phone use)
+        run: |
+          python3 -X utf8 scripts/prepare-parent-recovery.py --build-root appsrc --evidence-root out --output-directory out/parent-recovery --operator-public-key "$RUNNER_TEMP/operator-public.txt"
+          "$ANDROID_HOME/build-tools/36.0.0/zipalign" -c -P 16 4 out/parent-recovery/Family-Parent-v2.3.3-Recovery-unsigned.apk
+          echo 'REVIEW ONLY: ephemeral CI report key. Use locally built operator-case APK, local signing and separate recovery approval. No Child APK is emitted.' > out/parent-recovery/CI-REVIEW-ONLY.txt
       - uses: actions/upload-artifact@v4
         with:
-          name: family-location-v2.3.3-unsigned-candidate
-          path: out/
+          name: family-location-v2.3.3-parent-recovery-review
+          path: out/parent-recovery/
           retention-days: 14
       - uses: actions/upload-artifact@v4
         if: always()
@@ -85,5 +80,4 @@ jobs:
             appsrc/enrollment/build/reports/tests/
             appsrc/child-app/build/reports/tests/
             appsrc/parent-app/build/reports/tests/
-            appsrc/child-app/build/reports/lint-results-release.*
             appsrc/parent-app/build/reports/lint-results-release.*

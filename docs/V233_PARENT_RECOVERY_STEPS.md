@@ -1,0 +1,19 @@
+# Parent Recovery — operator steps
+
+Current stop: phone inspection/binding not yet verified; no approval, new Auth/key, rebind or deployment. Normal signed v2.3.3 pair/Release ZIP from be761030 is preserved. Only the separate Parent Recovery artifact is prepared here.
+
+1. Local operator case: `C:\Users\Admin\Documents\FamilyLocation-ParentRecovery\v233-case-20261106`. Its DPAPI transport/approval private key stays there; never regenerate it or include the directory in a release. Public recipient key is baked into the local recovery candidate. CI uses a different ephemeral key and its review APK must not be used on the phone.
+2. Run in PowerShell7 to sign the local Parent-only candidate; enter the existing JKS password directly at its SecureString prompt:
+
+```powershell
+& 'C:\Program Files\PowerShell\7\pwsh.exe' -NoProfile -File 'C:\Users\Admin\Documents\ChatGPT\Xác định Vị trí\source\scripts\sign-parent-recovery.ps1' -CaseDirectory 'C:\Users\Admin\Documents\FamilyLocation-ParentRecovery\v233-case-20261106'
+```
+
+Use `-CheckEnvironmentOnly` for password-free preflight. The output is `out/v233-parent-recovery/Family-Parent-v2.3.3-Recovery-Installable.apk`; no Child APK is signed or republished. It verifies com.family.parent/2.3.3/code37, distinct recovery manifest/operator key, unchanged certificate, apksigner and16KiB alignment.
+
+3. Manually install over Kết Nối on the original Parent/profile, without uninstall/Clear Data. Open it and read Auth/key flags. This is inspection-only until an approved file is imported and the explicit apply dialog is accepted. Export the encrypted report and transfer that file to the protected operator case on the PC via USB, same-network transfer or another existing file-transfer method. No private values in chat; USB debugging is optional.
+4. Re-run read-only backup into a NEW protected folder using `scripts/backup-parent-recovery.ps1` (existing Google service-account file, local Node). It only GETs Firestore/health and performs read-only Auth lookup. Supply local file paths, never credential contents. `scripts/read-parent-recovery-report.ps1` takes CaseDirectory, encrypted report, snapshot folder and the existing local DPAPI pepper path. It prints flags only. Stop if binding fails or retained UID is unrelated/Child.
+5. Return only Auth/key flags and MATCH/MISMATCH/UNKNOWN to the user; review the scope in V233_PARENT_RECOVERY_PROPOSAL.md. Do not run approve-parent-recovery.ps1, deploy the Worker or import/execute a recovery approval until the user explicitly approves the exact scopes. Re-read the approved snapshot before issuing the short-lived file. No command enabling production rebind has been executed.
+6. After separately approved guard/public-authority deployment and Parent-only rebind, verify current Parent membership, retirement of old access, unchanged Child mapping/token/history, dashboard/history read and a new command under the new epoch. Do not infer GPS success from FCM or HTTP200. Keep the same operation on retries; no blind rollback or identity regeneration.
+
+Keystore, release signer and existing artifacts remain unchanged. Pairing/signing credentials are entered only on the local machine. No master merge, automatic phone installation or production deployment is part of preparation.

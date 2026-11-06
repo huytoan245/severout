@@ -37,7 +37,7 @@ const outbound = async request => {
   if (url.pathname.endsWith('/documents:commit')) {
     const writes=(await request.json()).writes;
     for(const w of writes) {const previous=w.update.name.endsWith('/families/family-01')?family:w.update.name.endsWith('/devices/child-01')?device:audits.get(w.update.name);if(w.currentDocument.exists===false && previous) return new Response('',{status:409});if(w.currentDocument.updateTime && previous?.updateTime!==w.currentDocument.updateTime) return new Response('',{status:409});}
-    for(const w of writes) {const isFamily=w.update.name.endsWith('/families/family-01');const previous=isFamily?family:device;const updated={fields:{...previous?.fields,...w.update.fields},updateTime:String(++revision)};if(isFamily) family=updated;else if(w.update.name.endsWith('/devices/child-01')) device=updated;else audits.set(w.update.name,updated);}
+    for(const w of writes) {const isFamily=w.update.name.endsWith('/families/family-01');const previous=isFamily?family:device;const updated={fields:{...previous?.fields,...w.update.fields},updateTime:new Date(1800000000000+(++revision)).toISOString()};if(isFamily) family=updated;else if(w.update.name.endsWith('/devices/child-01')) device=updated;else audits.set(w.update.name,updated);}
     return Response.json({});
   }
   const isFamily = url.pathname.endsWith('/families/family-01');
@@ -46,7 +46,7 @@ const outbound = async request => {
   if (request.method === 'PATCH') {
     const condition = url.searchParams.get('currentDocument.updateTime');
     if ((condition && previous?.updateTime !== condition) || (url.searchParams.get('currentDocument.exists') === 'false' && previous)) return new Response('',{status:409});
-    const updated = {fields:{...previous?.fields,...(await request.json()).fields},updateTime:String(++revision)};
+    const updated = {fields:{...previous?.fields,...(await request.json()).fields},updateTime:new Date(1800000000000+(++revision)).toISOString()};
     if (isFamily) family=updated; else device=updated;
     return Response.json(updated);
   }
@@ -55,10 +55,10 @@ const outbound = async request => {
 const options = convertV4MiniflareOptions({ scriptPath: resolve('dist/worker.js'), modules: true, compatibilityDate: '2026-10-03',
   durableObjects: { WAKE_STATE: { className: 'WakeCoordinator', useSQLite: true }, FAMILY_REGISTRY: {className:'FamilyRegistry',useSQLite:true} }, resourcePersistencePath: persist,
   outboundService: outbound,
-  bindings: { FIREBASE_PROJECT_ID: 'family-location-884e5', ENROLLMENT_ENABLED:'true', GOOGLE_SERVICE_ACCOUNT_JSON: JSON.stringify(sa),DEVICE_BINDING_PEPPER:b64(crypto.getRandomValues(new Uint8Array(32))) } });
+  bindings: { FIREBASE_PROJECT_ID: 'family-location-884e5', ENROLLMENT_ENABLED:'true', GOOGLE_SERVICE_ACCOUNT_JSON: JSON.stringify(sa),PARENT_RECOVERY_OPERATOR_PUBLIC_KEY:rsaPublic.export({type:'spki',format:'der'}).toString('base64'),DEVICE_BINDING_PEPPER:b64(crypto.getRandomValues(new Uint8Array(32))) } });
 const req = () => new Request('https://internal/v1/wake', { method: 'POST', body: JSON.stringify({command:{deviceId:'child-01',requestId:String(id),requestedAt:id},binding:{parentUid:'test-parent',epoch:1}}) });
 let mf = new Miniflare(options);
-const publicCall=async (uid,path,body,overrides={})=>mf.dispatchFetch('https://local'+path,{method:body==null?'GET':'POST',headers:{'content-type':'application/json',Authorization:'Bearer '+testJwt(uid,overrides)},...(body==null?{}:{body:JSON.stringify(body)})});
+const publicCall=async (uid,path,body,overrides={},extraHeaders={})=>mf.dispatchFetch('https://local'+path,{method:body==null?'GET':'POST',headers:{'content-type':'application/json',Authorization:'Bearer '+testJwt(uid,overrides),...extraHeaders},...(body==null?{}:{body:JSON.stringify(body)})});
 const call = async (stub, uid, operation, body) => stub.fetch(new Request('https://registry.internal',{method:'POST',body:JSON.stringify({uid,operation,body})}));
 try {
   const health = await mf.dispatchFetch('https://local/health'); assert.equal((await health.json()).version, '2.3.2');
@@ -102,15 +102,24 @@ try {
   assert.equal(family.fields.parentBootstrapConsumed.booleanValue,true);assert.equal(family.fields.childBootstrapConsumed.booleanValue,true);
   for(const role of ['parent','child']) {
     const uid='reinstalled-'+role,keys=await crypto.subtle.generateKey({name:'ECDSA',namedCurve:'P-256'},true,['sign','verify']);
-    const c=await publicCall(uid,'/v1/challenge',{familyId:'family-01',deviceId:'child-01',role,purpose:'rebind'});assert.equal(c.status,200);
+    const guard=role==='parent'?{revision:family.updateTime,epoch:Number(family.fields.epoch.integerValue),generation:0,operationId:crypto.randomUUID()}:null;
+    const recoveryHeaders=async value=>{
+      if(!value)return {};
+      const consent={scope:'PARENT_ONLY_REBIND',bindingMatched:true,issuedAt:Date.now()-1000,expiresAt:Date.now()+60000,...value,reportHash:await digest('reviewed-runtime-report'),materialHash:await digest(await digest('runtime-phone-parent')),oldParentUidHash:await digest('test-parent')};
+      const raw=Buffer.from(JSON.stringify(consent)),approval={payload:raw.toString('base64'),signature:rsaSign('RSA-SHA256',raw,privateKey).toString('base64')};
+      return {'X-Family-Recovery-Guard':b64(new TextEncoder().encode(JSON.stringify(value))),'X-Family-Recovery-Approval':b64(new TextEncoder().encode(JSON.stringify(approval)))};
+    };
+    const headers=await recoveryHeaders(guard);
+    if(guard){const wrong={...guard,revision:'2026-11-06T08:00:00.000000Z'};assert.equal((await publicCall(uid,'/v1/challenge',{familyId:'family-01',deviceId:'child-01',role,purpose:'rebind'},{},await recoveryHeaders(wrong))).status,409);}
+    const c=await publicCall(uid,'/v1/challenge',{familyId:'family-01',deviceId:'child-01',role,purpose:'rebind'},{},headers);assert.equal(c.status,200);
     const nonce=(await c.json()).nonce,payload=JSON.stringify({familyId:'family-01',deviceId:'child-01',version:'2.3.2',deviceRecoveryMaterial:await digest('runtime-phone-'+role)});
     const p={nonce,payload,publicKey:b64(await crypto.subtle.exportKey('spki',keys.publicKey)),signature:b64(await crypto.subtle.sign({name:'ECDSA',hash:'SHA-256'},keys.privateKey,new TextEncoder().encode(proofMessage(uid,role,nonce,'rebind',await digest(payload)))))};
-    assert.equal((await publicCall(uid,'/v1/rebind/'+role,p)).status,200);
+    assert.equal((await publicCall(uid,'/v1/rebind/'+role,p,{},headers)).status,200);
     await mf.dispose();mf=new Miniflare(options);
-    assert.equal((await publicCall(uid,'/v1/rebind/'+role,p)).status,200);
+    assert.equal((await publicCall(uid,'/v1/rebind/'+role,p,{},headers)).status,200);
     assert.equal((await publicCall('test-'+role,'/v1/family')).status,403);
     assert.equal(family.fields.epoch.integerValue,String(role==='parent'?2:3));
   }
   assert.equal(audits.size,2);assert.equal(device.fields.fcmToken.stringValue,'');assert.equal(device.fields.fcmTokenOwnerUid.stringValue,'');
-  console.log('PASS: actual workerd/SQLite: public Firebase JWT verification, Parent/Child enrollment, token CAS and HIGH FCM dispatch; persisted nonce/enrollment/rate after restart; unauthorized UID/project denied. All Google traffic intercepted; no production deployment.');
+  console.log('PASS: actual workerd/SQLite: public Firebase JWT verification, Parent/Child enrollment, token CAS and HIGH FCM dispatch; server-verified operator approval and guarded Parent-only snapshot rebind and replay after restart; persisted nonce/enrollment/rate; unauthorized UID/project denied. All Google traffic intercepted; no production deployment.');
 } finally { await mf.dispose(); }

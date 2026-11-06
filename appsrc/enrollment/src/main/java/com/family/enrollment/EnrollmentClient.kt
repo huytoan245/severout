@@ -23,9 +23,11 @@ object EnrollmentClient {
         return try{if(!DeviceIdentity.exists())false else EnrollmentStartup.cacheMatches(prefs.getInt("binding_protocol",0),prefs.getString("registered_$role",null),uid,prefs.getString("registered_key",null),DeviceIdentity.existingPublicKey())}catch(_:Exception){false}
     }
     @Synchronized fun ensureRegistered(context: Context, base: String, role: String, bootstrap: String, force: Boolean = false): String {
+        if(EnrollmentMode.inspectionOnly(context))throw EnrollmentFailure("recovery_inspection_only",403)
         return EnrollmentManager.ensure(context, base, role, bootstrap, force)
     }
     @Synchronized fun signed(context: Context, base: String, role: String, purpose: String, payload: JSONObject, bootstrap: String = ""): JSONObject {
+        if(EnrollmentMode.inspectionOnly(context))throw EnrollmentFailure("recovery_inspection_only",403)
         val updateOnly=EnrollmentMode.updateOnly(context)
         if(updateOnly && (!DeviceIdentity.exists() || purpose=="rebind" || bootstrap.isNotEmpty()))throw EnrollmentFailure("device_key_missing",403)
         val publicKey=if(updateOnly)DeviceIdentity.existingPublicKey() else DeviceIdentity.publicKey()
@@ -56,7 +58,7 @@ object EnrollmentClient {
             throw e
         }
     }
-    private fun call(base: String, path: String, body: JSONObject, uid: String): JSONObject {
+    internal fun call(base: String, path: String, body: JSONObject, uid: String, recoveryGuard:String?=null, recoveryApproval:String?=null, get:Boolean=false): JSONObject {
         val origin = URL(base)
         require(origin.protocol == "https" && origin.host.isNotBlank() && origin.userInfo == null && origin.query == null && origin.ref == null && (origin.path.isEmpty() || origin.path == "/"))
         repeat(2) { index ->
@@ -64,13 +66,15 @@ object EnrollmentClient {
             if (user.uid != uid) throw EnrollmentFailure("identity_changed", 403)
             val token = Tasks.await(user.getIdToken(index > 0), 15, TimeUnit.SECONDS).token ?: throw EnrollmentFailure("no_id_token", 503)
             val connection = (URL(base.trimEnd('/') + path).openConnection() as HttpURLConnection).apply {
-                requestMethod = "POST"; connectTimeout = 8_000; readTimeout = 8_000; instanceFollowRedirects = false
-                doOutput = true; useCaches = false; setRequestProperty("Connection", "close")
+                requestMethod = if(get)"GET" else "POST"; connectTimeout = 8_000; readTimeout = 8_000; instanceFollowRedirects = false
+                doOutput = !get; useCaches = false; setRequestProperty("Connection", "close")
+                if(recoveryGuard!=null)setRequestProperty("X-Family-Recovery-Guard",recoveryGuard)
+                if(recoveryApproval!=null)setRequestProperty("X-Family-Recovery-Approval",recoveryApproval)
                 setRequestProperty("Content-Type", "application/json"); setRequestProperty("Authorization", "Bearer $token")
             }
             try {
                 if (FirebaseAuth.getInstance().currentUser?.uid != uid) throw EnrollmentFailure("identity_changed", 403)
-                connection.outputStream.use { it.write(body.toString().toByteArray(Charsets.UTF_8)) }
+                if(!get)connection.outputStream.use { it.write(body.toString().toByteArray(Charsets.UTF_8)) }
                 val status = connection.responseCode
                 if (status == 401 && index == 0) return@repeat
                 val stream = if (status in 200..299) connection.inputStream else connection.errorStream

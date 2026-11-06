@@ -1,6 +1,8 @@
 import { ApiError, GoogleApi, b64, unb64 } from './google.js';
 import { validateRequest } from './coordinator.js';
 import { bindingHash, canonicalHash, constantTimeEqual } from './device-binding.js';
+import {recoveryGuard,guardMatches} from './recovery-guard.js';
+import {approvalEnvelope,verifyApproval} from './recovery-approval.js';
 const utf8 = new TextEncoder();
 const roles = ['parent', 'child'];
 const purposes = ['register', 'rebind', 'token', 'wake'];
@@ -43,9 +45,15 @@ export class FamilyRegistry {
   async fetch(request) {
     return this.locked(async () => {
       try {
-        const { uid, operation, body } = await request.json();
+        const { uid, operation, body, guard:rawGuard, approval:rawApproval } = await request.json();
+        const guard=recoveryGuard(rawGuard);
+        const approval=approvalEnvelope(rawApproval);
+        if(guard && !(operation==='rebindParent'||(operation==='challenge' && body?.role==='parent' && body?.purpose==='rebind')))throw new ApiError('invalid_recovery_guard',400);
         if (typeof uid !== 'string' || !uid || uid.length > 128) throw new ApiError('unauthorized', 401);
         await this.rate(uid);
+        const parentRecovery=operation==='rebindParent'||(operation==='challenge'&&body?.role==='parent'&&body?.purpose==='rebind');
+        if(approval&&!parentRecovery)throw new ApiError('invalid_operator_approval',400);
+        const consent=parentRecovery&&(approval||this.env.PARENT_RECOVERY_OPERATOR_PUBLIC_KEY)?await verifyApproval(this.env,approval,guard,this.clock()):null;
         if (operation === 'state' || operation === 'diagnostics') {
           const f = await this.family();
           if (uid !== f.parentUid && uid !== f.childUid) throw new ApiError('role_not_registered', 403);
@@ -54,6 +62,8 @@ export class FamilyRegistry {
         if (operation === 'challenge') {
           if (!exact(body, ['familyId', 'deviceId', 'role', 'purpose']) || body.familyId !== 'family-01' || body.deviceId !== 'child-01' || !roles.includes(body.role) || !purposes.includes(body.purpose) || (body.purpose === 'wake' && body.role !== 'parent') || (body.purpose === 'token' && body.role !== 'child')) throw new ApiError('invalid_request', 400);
           const f = await this.family(), owner = f[body.role + 'Uid'];
+          guardMatches(guard,f);
+          if(consent&&consent.oldParentUidHash!==await digest(f.parentUid))throw new ApiError('operator_approval_scope_invalid',403);
           if ((f.retiredUidHashes || '').split(',').includes(await digest(uid))) throw new ApiError('retired_identity', 403);
           if (body.purpose === 'rebind') {
             if (!owner || !canonicalHash(f[body.role+'DeviceBindingHash'])) throw new ApiError('operator_recovery_required', 403);
@@ -69,14 +79,16 @@ export class FamilyRegistry {
             this.bootstrapAvailable(f, body.role);
           }
           const nonce = b64(crypto.getRandomValues(new Uint8Array(32))), expires = this.clock() + 120000;
-          await this.ctx.storage.put('nonce:' + nonce, { uid, role: body.role, purpose: body.purpose, expires, epoch: f.epoch || 1, generation: f[body.role+'RebindGeneration'] || 0 });
-          return json({ nonce, expires, epoch:f.epoch, needsBootstrap: body.purpose === 'register' && !owner });
+          await this.ctx.storage.put('nonce:' + nonce, { uid, role: body.role, purpose: body.purpose, expires, epoch: f.epoch || 1, generation: f[body.role+'RebindGeneration'] || 0, ...(guard?{guard}: {}), ...(approval?{approvalHash:await digest(JSON.stringify(approval))}: {}) });
+          return json({ nonce, expires, epoch:f.epoch, needsBootstrap: body.purpose === 'register' && !owner, ...(guard?{recoveryGuardHash:await digest(JSON.stringify(guard)),generation:guard.generation}: {}) });
         }
         const role = ['registerParent','rebindParent','wake'].includes(operation) ? 'parent' : 'child';
         const purpose = operation.startsWith('register') ? 'register' : operation.startsWith('rebind') ? 'rebind' : operation;
         if (!['registerParent', 'registerChild', 'rebindParent', 'rebindChild', 'token', 'wake'].includes(operation) || !exact(body, ['nonce', 'signature', 'publicKey', 'payload']) || typeof body.nonce !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(body.nonce) || typeof body.payload !== 'string' || utf8.encode(body.payload).length > 3072 || typeof body.publicKey !== 'string' || !/^[A-Za-z0-9_-]{120,160}$/.test(body.publicKey) || typeof body.signature !== 'string' || !/^[A-Za-z0-9_-]{86}$/.test(body.signature)) throw new ApiError('invalid_proof', 400);
         const key = 'nonce:' + body.nonce, challenge = await this.ctx.storage.get(key);
         if (!challenge || challenge.expires <= this.clock() || challenge.uid !== uid || challenge.role !== role || challenge.purpose !== purpose) throw new ApiError('invalid_nonce', 403);
+        if(JSON.stringify(challenge.guard||null)!==JSON.stringify(guard))throw new ApiError('recovery_guard_changed',403);
+        if((challenge.approvalHash||null)!==(approval?await digest(JSON.stringify(approval)):null))throw new ApiError('operator_approval_changed',403);
         const hash = await digest(JSON.stringify(body));
         if (challenge.proofHash && challenge.proofHash !== hash) throw new ApiError('nonce_reused', 409);
         let payload;
@@ -93,6 +105,8 @@ export class FamilyRegistry {
         if (purpose === 'rebind' && f[role+'RebindProofHash'] === hash && f[role+'Uid'] === uid && f[role+'Key'] === body.publicKey && f[role+'RebindGeneration'] === challenge.generation + 1) {
           return json({ ...familyState(f), registered:true, rebound:true, role });
         }
+        guardMatches(guard,f);
+        if(consent&&(consent.oldParentUidHash!==await digest(f.parentUid)||consent.materialHash!==await digest(payload.deviceRecoveryMaterial)))throw new ApiError('operator_approval_scope_invalid',403);
         if ((f.epoch || 1) !== challenge.epoch) throw new ApiError('family_changed', 403);
         if ((f.retiredKeyHashes || '').split(',').includes(await digest(body.publicKey))) throw new ApiError('fresh_key_required',403);
         if (purpose !== 'rebind' && f[role + 'Uid'] && (f[role + 'Uid'] !== uid || f[role + 'Key'] !== body.publicKey)) throw new ApiError('slot_occupied', 403);
@@ -142,7 +156,7 @@ export class FamilyRegistry {
           const retiredKeys = new Set((f.retiredKeyHashes || '').split(',').filter(Boolean));
           retiredKeys.add(await digest(f[role+'Key']));
           const next = {...f,epoch:f.epoch+1,[role+'Uid']:uid,[role+'Key']:body.publicKey,[role+'RebindGeneration']:challenge.generation+1,[role+'ReboundAt']:this.clock(),[role+'RebindProofHash']:hash,retiredUidHashes:[...retired].join(','),retiredKeyHashes:[...retiredKeys].join(',')};
-          if (!await this.api.rebindIdentity(f,next,role,{oldUidHash:await digest(f[role+'Uid']),oldKeyHash:await digest(f[role+'Key']),newUidHash:await digest(uid),proofHash:hash,time:this.clock()})) throw new ApiError('rebind_raced',409,true);
+          if (!await this.api.rebindIdentity(f,next,role,{oldUidHash:await digest(f[role+'Uid']),oldKeyHash:await digest(f[role+'Key']),newUidHash:await digest(uid),proofHash:hash,time:this.clock(),...(guard?{operationId:guard.operationId,approvedRevision:guard.revision}: {})})) throw new ApiError('rebind_raced',409,true);
           result = {...familyState(next),registered:true,rebound:true,role};
         } else if (purpose === 'token') result = await this.api.updateChildToken(f, uid, payload, this.clock());
         else {
