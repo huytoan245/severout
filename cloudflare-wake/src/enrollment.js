@@ -64,6 +64,7 @@ export class FamilyRegistry {
           const f = await this.family(), owner = f[body.role + 'Uid'];
           guardMatches(guard,f);
           if(consent&&consent.oldParentUidHash!==await digest(f.parentUid))throw new ApiError('operator_approval_scope_invalid',403);
+          if(consent&&f.parentKey&&f.parentKey===f.childKey)throw new ApiError('role_key_conflict',403);
           if ((f.retiredUidHashes || '').split(',').includes(await digest(uid))) throw new ApiError('retired_identity', 403);
           if (body.purpose === 'rebind') {
             if (!owner || !canonicalHash(f[body.role+'DeviceBindingHash'])) throw new ApiError('operator_recovery_required', 403);

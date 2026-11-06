@@ -1,11 +1,13 @@
 #requires -Version 7.2
-param([Parameter(Mandatory)][string]$Directory,[Parameter(Mandatory)][string]$EncryptedReport,[Parameter(Mandatory)][string]$SnapshotDirectory,[switch]$ConfirmOriginalPhoneProfile,[string]$PepperPath='C:\Users\Admin\Documents\FamilyLocation-ServerCredentials\device-binding-pepper.v232.dpapi')
+param([Parameter(Mandatory)][string]$Directory,[Parameter(Mandatory)][string]$EncryptedReport,[Parameter(Mandatory)][string]$SnapshotDirectory,[switch]$ConfirmOriginalPhoneProfile,[string]$ExpectedRevision,[long]$ExpectedEpoch=0,[long]$ExpectedGeneration=-1,[string]$PepperPath='C:\Users\Admin\Documents\FamilyLocation-ServerCredentials\device-binding-pepper.v232.dpapi')
 $ErrorActionPreference='Stop'
 . (Join-Path $PSScriptRoot 'ParentRecovery.Common.ps1')
 $checked=Test-RecoveryReport $Directory $EncryptedReport $SnapshotDirectory $PepperPath
 if(-not$checked.Safe.eligibleForReview){throw 'STOP: binding/key/Auth conditions not eligible; no approval issued'}
 $summary=Get-Content -LiteralPath (Join-Path $SnapshotDirectory 'READONLY-SUMMARY.json') -Raw|ConvertFrom-Json
 if(-not$ConfirmOriginalPhoneProfile-or([DateTimeOffset]::UtcNow-[DateTimeOffset]::Parse($summary.checkedAt)).TotalMinutes-gt5){throw 'Fresh read-only backup and explicit same-phone/profile confirmation required'}
+if(-not$ExpectedRevision-or$checked.Safe.revision-cne$ExpectedRevision-or$checked.Safe.epoch-ne$ExpectedEpoch-or$checked.Safe.generation-ne$ExpectedGeneration){throw 'STOP: production differs from the explicitly reviewed revision/epoch/generation; never silently rebase approval'}
+$checked.Safe|Select-Object bindingMatch,authPresent,authMatchesParent,authMatchesChild,keyPresent,keyUsable,rolesDistinct,revision,epoch,generation|ConvertTo-Json|Write-Host
 Write-Host 'STOP until explicit approval: Parent-only new Anonymous UID/key, exact-snapshot rebind and epoch increment. No Child/history changes. Backend guard deployment requires separate approval.'
 if((Read-Host 'Type APPROVE_PARENT_ONLY_REBIND only after reviewing this scope')-cne'APPROVE_PARENT_ONLY_REBIND'){throw 'No approval; nothing issued'}
 $now=[DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()

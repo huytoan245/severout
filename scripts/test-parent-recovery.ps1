@@ -17,7 +17,7 @@ try{
  $material=Get-RecoveryBase64Url ([Security.Cryptography.RandomNumberGenerator]::GetBytes(32))
  $hmac=[Security.Cryptography.HMACSHA256]::new([Convert]::FromBase64String($pepper.Replace('-','+').Replace('_','/')+'='))
  try{$binding=Get-RecoveryBase64Url ($hmac.ComputeHash([Text.Encoding]::UTF8.GetBytes("FL232-BIND`nfamily-01`nparent`n$material")))}finally{$hmac.Dispose()}
- @{fields=@{parentUid=@{stringValue='fixture-parent'};childUid=@{stringValue='fixture-child'};parentDeviceBindingHash=@{stringValue=$binding}};updateTime='2026-11-06T08:00:00.123456Z'}|ConvertTo-Json -Depth 5|Set-Content -LiteralPath (Join-Path $snapshot 'family.private.json')
+ @{fields=@{parentUid=@{stringValue='fixture-parent'};childUid=@{stringValue='fixture-child'};parentKey=@{stringValue='fixture-parent-key'};childKey=@{stringValue='fixture-child-key'};parentDeviceBindingHash=@{stringValue=$binding}};updateTime='2026-11-06T08:00:00.123456Z'}|ConvertTo-Json -Depth 5|Set-Content -LiteralPath (Join-Path $snapshot 'family.private.json')
  @{checkedAt=[DateTimeOffset]::UtcNow.ToString('o');schema=232;parentSlotPresent=$true;childSlotPresent=$true;parentBindingPresent=$true;parentAuthAccountExists=$true;parentAuthDisabled=$false;epoch=3;parentRebindGeneration=0}|ConvertTo-Json|Set-Content -LiteralPath (Join-Path $snapshot 'READONLY-SUMMARY.json')
  $report=@{format='FL233-PARENT-INSPECTION-1';role='parent';package='com.family.parent';signer='62b909ff3c5e6b56565cfe2814913778acdf694f32a042f12bc05c35404ed63f';material=$material;collectedAt=[DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds();keyPresent=$false;keyUsable=$false;uid='fixture-parent'}
  $reportPath=Join-Path $root 'encrypted.json'
@@ -47,6 +47,10 @@ try{
  Reject {Test-RecoveryReport $case $reportPath $snapshot $pepperPath} 'AES-GCM tampering rejected'
  WriteEnvelope
  Reject {& (Join-Path $PSScriptRoot 'approve-parent-recovery.ps1') -Directory $case -EncryptedReport $reportPath -SnapshotDirectory $snapshot -PepperPath $pepperPath} 'No same-phone confirmation means no approval and no prompt'
+ Reject {& (Join-Path $PSScriptRoot 'approve-parent-recovery.ps1') -Directory $case -EncryptedReport $reportPath -SnapshotDirectory $snapshot -PepperPath $pepperPath -ConfirmOriginalPhoneProfile -ExpectedRevision '2026-11-06T08:00:00.999999Z' -ExpectedEpoch 3 -ExpectedGeneration 0} 'Changed proposal snapshot cannot silently issue approval'
+ $familyPath=Join-Path $snapshot 'family.private.json';$family=Get-Content -LiteralPath $familyPath -Raw|ConvertFrom-Json
+ $family.fields.childKey.stringValue=$family.fields.parentKey.stringValue;$family|ConvertTo-Json -Depth 5|Set-Content -LiteralPath $familyPath
+ Check (-not(Test-RecoveryReport $case $reportPath $snapshot $pepperPath).Safe.eligibleForReview) 'Shared Parent/Child key stops to preserve Child access'
  Check (-not(Test-Path -LiteralPath (Join-Path $case 'Parent-only-approval.json'))) 'No approval produced by tests'
  Check ((Get-FileHash -LiteralPath (Join-Path $case 'operator-transport.dpapi')).Hash-ceq$privateHash) 'Operator case private bytes unchanged'
  Write-Output "PASS: $count Parent recovery operator regressions. Ephemeral fixtures only; no live signer, pepper, Auth, device or production writes."

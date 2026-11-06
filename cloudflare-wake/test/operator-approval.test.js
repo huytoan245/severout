@@ -63,3 +63,8 @@ test('guarded Parent commit writes only Parent/epoch/retirement fields, never Ch
  assert.equal(Object.keys(captured[0].update.fields).some(k=>k.startsWith('child')),false);
  assert.equal(captured.length,2);assert.equal(captured[1].currentDocument.exists,false);
 });
+test('shared old Parent/Child key cannot be retired by Parent recovery',async()=>{
+ const x=await setup();const f=x.h.documents.get('families/family-01');f.fields.childKey=structuredClone(f.fields.parentKey);
+ assert.equal((await challenge(x,envelope(x.consent))).body.error,'role_key_conflict');
+ assert.equal((await x.h.api.readFamily()).parentUid,x.old.uid);
+});

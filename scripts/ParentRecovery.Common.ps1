@@ -36,6 +36,9 @@ function Test-RecoveryReport([string]$Directory,[string]$EncryptedReport,[string
     if(-not$report.keyPresent-and$report.keyUsable){throw 'Inconsistent key presence metadata'}
     $uidMatchesParent=$report.uid -and $report.uid-ceq$family.fields.parentUid.stringValue
     $uidMatchesChild=$report.uid -and $report.uid-ceq$family.fields.childUid.stringValue
+    $rolesDistinct=$family.fields.parentUid.stringValue-cne$family.fields.childUid.stringValue -and
+        $family.fields.parentKey.stringValue -and $family.fields.childKey.stringValue -and
+        $family.fields.parentKey.stringValue-cne$family.fields.childKey.stringValue
     # Read the EXISTING pepper only. Missing backup is a stop, never regeneration.
     $pepperBytes=[Security.Cryptography.ProtectedData]::Unprotect([IO.File]::ReadAllBytes($PepperPath),$null,[Security.Cryptography.DataProtectionScope]::CurrentUser)
     try{
@@ -47,6 +50,6 @@ function Test-RecoveryReport([string]$Directory,[string]$EncryptedReport,[string
         $expected=[Convert]::FromBase64String($family.fields.parentDeviceBindingHash.stringValue.Replace('-','+').Replace('_','/')+'=')
         $match=[Security.Cryptography.CryptographicOperations]::FixedTimeEquals($computed,$expected)
     }finally{[Array]::Clear($pepperBytes,0,$pepperBytes.Length);$pepper=$null}
-    $safe=[ordered]@{bindingMatch=$match;authPresent=[bool]$report.uid;authMatchesParent=[bool]$uidMatchesParent;authMatchesChild=[bool]$uidMatchesChild;keyPresent=$report.keyPresent;keyUsable=$report.keyUsable;eligibleForReview=($match-and-not$report.keyPresent-and-not$uidMatchesChild-and(-not$report.uid-or$uidMatchesParent));revision=$family.updateTime;epoch=$summary.epoch;generation=$summary.parentRebindGeneration;reportHash=(Get-RecoveryDigest $raw);productionMutation=$false}
+    $safe=[ordered]@{bindingMatch=$match;authPresent=[bool]$report.uid;authMatchesParent=[bool]$uidMatchesParent;authMatchesChild=[bool]$uidMatchesChild;keyPresent=$report.keyPresent;keyUsable=$report.keyUsable;rolesDistinct=[bool]$rolesDistinct;eligibleForReview=($match-and$rolesDistinct-and-not$report.keyPresent-and-not$uidMatchesChild-and(-not$report.uid-or$uidMatchesParent));revision=$family.updateTime;epoch=$summary.epoch;generation=$summary.parentRebindGeneration;reportHash=(Get-RecoveryDigest $raw);productionMutation=$false}
     return @{Safe=$safe;Raw=$raw;Family=$family}
 }
