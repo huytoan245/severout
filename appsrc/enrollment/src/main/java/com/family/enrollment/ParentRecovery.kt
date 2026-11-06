@@ -64,11 +64,11 @@ object ParentRecovery {
         }finally{connection.disconnect()}
     }
     @Synchronized fun applyApproved(c:Context,base:String){
-        checkMode(c);val p=prefs(c);val report=JSONObject(p.getString("report",null)?:error("inspect_first"))
+        checkMode(c);val p=prefs(c);val reportRaw=p.getString("report",null)?:error("inspect_first");val report=JSONObject(reportRaw)
         val approval=JSONObject(p.getString("approval",null)?:error("separate_operator_approval_required"))
         val expired=approval.getLong("expiresAt")<=System.currentTimeMillis()
         check(!expired || (p.getBoolean("postAttempted",false) && p.contains("newUid") && p.contains("newKey"))){ "approval_expired" }
-        check(approval.getString("reportHash")==RecoveryEnvelope.hash(report.toString())){"approval_scope_invalid"}
+        check(approval.getString("reportHash")==RecoveryEnvelope.hash(reportRaw)){"approval_scope_invalid"}
         check(DeviceRecoveryBindingProvider.material(c,"parent")==report.getString("material")){"device_changed"}
         if(!expired){val health=health(base);check(health.optInt("parentRecoveryGuard")==1 && health.optBoolean("configured") && health.optString("parentRecoveryOperatorKeyHash")==p.getString("operatorKeyHash",null)){"backend_guard_required"}}
         val auth=FirebaseAuth.getInstance();waitAuth()
