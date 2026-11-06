@@ -38,6 +38,7 @@ import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.google.firebase.auth.FirebaseAuth
 import com.family.enrollment.EnrollmentClient
+import com.family.enrollment.EnrollmentStartup
 import com.family.core.*
 import com.google.firebase.firestore.FieldPath
 import com.google.firebase.firestore.FirebaseFirestore
@@ -142,13 +143,30 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun ParentApp(savedState: Bundle?, onMapViewCreated: (MapView) -> Unit) {
     val context = LocalContext.current
-    var authReady by remember { mutableStateOf(EnrollmentClient.registered(context, "parent")) }
-    var recoveryRequired by remember { mutableStateOf(false) }
+    var authReady by remember { mutableStateOf(false) }
+    var startupCode by remember { mutableStateOf("auth_initializing") }
+    var startupState by remember { mutableStateOf("AUTHENTICATING") }
+    var online by remember { mutableStateOf(true) }
+    DisposableEffect(Unit){
+        val auth=FirebaseAuth.getInstance()
+        val listener=FirebaseAuth.AuthStateListener { if(it.currentUser!=null)ParentEnrollmentWorker.schedule(context) }
+        auth.addAuthStateListener(listener)
+        val cm=context.getSystemService(ConnectivityManager::class.java)
+        val callback=object:ConnectivityManager.NetworkCallback(){override fun onAvailable(network:Network){ParentEnrollmentWorker.schedule(context)}}
+        var observing=false;try{cm.registerDefaultNetworkCallback(callback);observing=true}catch(_:Exception){}
+        onDispose{auth.removeAuthStateListener(listener);if(observing)try{cm.unregisterNetworkCallback(callback)}catch(_:Exception){}}
+    }
     LaunchedEffect(Unit) {
         ParentEnrollmentWorker.schedule(context)
+        val started=System.currentTimeMillis()
         while (true) {
             authReady = EnrollmentClient.registered(context, "parent")
-            recoveryRequired = context.getSharedPreferences("wake_diag", Context.MODE_PRIVATE).getString("enrollment", "") in setOf("slot_occupied", "role_conflict", "retired_identity", "role_not_registered")
+            val prefs=context.getSharedPreferences("wake_diag",Context.MODE_PRIVATE)
+            startupCode=prefs.getString("enrollment","auth_initializing")?:"auth_initializing"
+            startupState=prefs.getString("enrollment_state","AUTHENTICATING")?:"AUTHENTICATING"
+            if(!authReady && startupCode=="auth_initializing" && System.currentTimeMillis()-started>15_000)startupCode="auth_init_timeout"
+            val cm=context.getSystemService(ConnectivityManager::class.java)
+            online=cm.getNetworkCapabilities(cm.activeNetwork)?.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_VALIDATED)==true
             delay(1000L)
         }
     }
@@ -163,7 +181,12 @@ fun ParentApp(savedState: Bundle?, onMapViewCreated: (MapView) -> Unit) {
     MaterialTheme(colorScheme = scheme) {
         when {
             !authReady -> Box(Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
-                Text(if (recoveryRequired) "Cần khôi phục kết nối gia đình." else "Đang chờ Máy Con kết nối", color = MaterialTheme.colorScheme.onSurface)
+                Column(horizontalAlignment=Alignment.CenterHorizontally,verticalArrangement=Arrangement.spacedBy(12.dp)){
+                    Text(EnrollmentStartup.message(startupCode,online,startupState),color=MaterialTheme.colorScheme.onSurface)
+                    Text("${if(online)startupCode else "offline"} · $startupState",style=MaterialTheme.typography.bodySmall)
+                    if(EnrollmentStartup.recovery(startupCode) || startupState=="RECOVERY_REQUIRED")Text("Không gỡ ứng dụng hoặc Xóa dữ liệu. Cần kiểm tra định danh hiện có; recovery server được phê duyệt riêng.")
+                    Button(onClick={ParentEnrollmentWorker.schedule(context,retry=true)}){Text("Thử xác thực lại")}
+                }
             }
             else -> ParentDashboard(savedState, onMapViewCreated)
         }
@@ -569,8 +592,8 @@ fun ParentDashboard(savedState: Bundle?, onMapViewCreated: (MapView) -> Unit) {
             )
         else -> baseAssessment
     }
-    val lastServiceEvidenceAt = maxOf(lastLocalServiceHeartbeatAt, heartbeatAt, diagnosticAt)
-    val serviceLikelyStopped = networkAssessment.level == ConnectionLevel.LOST &&
+    val lastServiceEvidenceAt = lastLocalServiceHeartbeatAt
+    val serviceLikelyStopped =
         lastServiceEvidenceAt > 0L && now - lastServiceEvidenceAt >= SERVICE_SUSPECT_STALE_MS
     val assessedConnection = if (serviceLikelyStopped) {
         networkAssessment.copy(
@@ -586,6 +609,11 @@ fun ParentDashboard(savedState: Bundle?, onMapViewCreated: (MapView) -> Unit) {
     } else networkAssessment
     val assessment = when {
         !childRegistered -> ConnectionAssessment(ConnectionLevel.UNKNOWN, "Đang chờ Máy Con kết nối", "Máy Con sẽ tự kết nối sau khi mở ứng dụng.", 0L)
+        com.family.core.LivenessPolicy.assess(now,baseAssessment.lastContactAt,lastLocalServiceHeartbeatAt,seen).let { it.contactFresh && !it.gpsFresh } -> networkAssessment.copy(
+            level=ConnectionLevel.WARNING,
+            title="Máy Con đang kết nối nhưng vị trí chưa được cập nhật",
+            detail="GPS hợp lệ cuối: ${if(seen>0) "${formatDate(seen)} ${fmt(seen)}" else "chưa xác định"}. " +
+                when { backgroundLocationGranted==false -> "Máy Con báo thiếu quyền vị trí nền; mở app để kiểm tra quyền Mọi lúc."; locationEnabled==false -> "Máy Con báo Location đang tắt."; serviceLikelyStopped -> "Chưa có nhịp chạy dịch vụ gần đây; tín hiệu FCM không chứng minh GPS hoạt động."; else -> "Cần kiểm tra callback và lỗi GPS trong tab Sức khỏe." })
         assessedConnection.level == ConnectionLevel.UNKNOWN || assessedConnection.level == ConnectionLevel.CONNECTED -> assessedConnection.copy(title = "Máy Con · Đang kết nối")
         else -> assessedConnection
     }
@@ -806,6 +834,8 @@ fun ParentDashboard(savedState: Bundle?, onMapViewCreated: (MapView) -> Unit) {
                 parentRealtimeOk = !deviceFromCache && lastServerSnapshotAt > 0L && now - lastServerSnapshotAt <= 45_000L,
                 parentHttpsOk = parentHttpsRecent,
                 parentHttpsLatencyMs = ParentHttpsBridge.lastLatencyMs,
+                liveness = com.family.core.LivenessPolicy.assess(now,baseAssessment.lastContactAt,lastLocalServiceHeartbeatAt,seen),
+                lastGpsTime = seen,
                 survivalDiagnostics = survivalDiagnostics
             )
 
@@ -1156,6 +1186,8 @@ private fun HealthScreen(
     parentRealtimeOk: Boolean,
     parentHttpsOk: Boolean,
     parentHttpsLatencyMs: Long,
+    liveness: com.family.core.ChildLiveness,
+    lastGpsTime: Long,
     survivalDiagnostics: Map<String, String>
 ) {
     val lastServer = maxOf(firebaseAt, httpsAt, diagnosticAt)
@@ -1177,6 +1209,10 @@ private fun HealthScreen(
 
         item {
             HealthCard("Kết nối Máy Con") {
+                HealthRow("Liên lạc gần đây",if(liveness.contactFresh)"Có" else "Chưa có bằng chứng gần đây")
+                HealthRow("Nhịp chạy dịch vụ",if(liveness.serviceFresh)"Có gần đây" else "Chưa có bằng chứng gần đây")
+                HealthRow("GPS hợp lệ",if(liveness.gpsFresh)"Có gần đây" else "Chưa được cập nhật")
+                HealthRow("GPS hợp lệ cuối",if(lastGpsTime>0)"${formatDate(lastGpsTime)} ${fmt(lastGpsTime)}" else "Chưa xác định")
                 HealthRow("Mạng", networkLabel(networkType))
                 HealthRow("Internet được Android xác nhận", yesNoUnknown(networkValidated))
                 HealthRow("Trạng thái mạng cập nhật", if (networkAt > 0L) "${ageAt(now, networkAt)} trước" else "Chưa có dữ liệu")

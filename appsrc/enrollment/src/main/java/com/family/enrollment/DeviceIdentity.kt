@@ -40,9 +40,10 @@ internal object DeviceIdentity {
     // unchanged release APK signing certificate/JKS. Never export private material.
     private const val ALIAS = "family-location-enrollment-v1"
     fun exists(): Boolean = KeyStore.getInstance("AndroidKeyStore").apply{load(null)}.containsAlias(ALIAS)
-    @Synchronized private fun entry(): KeyStore.PrivateKeyEntry {
+    @Synchronized private fun entry(create: Boolean = true): KeyStore.PrivateKeyEntry {
         val store = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
         if (!store.containsAlias(ALIAS)) {
+            if(!create)throw EnrollmentFailure("device_key_missing",403)
             KeyPairGenerator.getInstance(KeyProperties.KEY_ALGORITHM_EC, "AndroidKeyStore").apply {
                 initialize(KeyGenParameterSpec.Builder(ALIAS, KeyProperties.PURPOSE_SIGN or KeyProperties.PURPOSE_VERIFY)
                     .setAlgorithmParameterSpec(ECGenParameterSpec("secp256r1"))
@@ -52,14 +53,15 @@ internal object DeviceIdentity {
         return store.getEntry(ALIAS, null) as KeyStore.PrivateKeyEntry
     }
     fun publicKey(): String = EnrollmentProof.base64(entry().certificate.publicKey.encoded)
+    fun existingPublicKey():String=EnrollmentProof.base64(entry(false).certificate.publicKey.encoded)
     /** Called only on explicit server rejection of a reused/retired installation key. */
     @Synchronized fun renewInstallationKey() {
         KeyStore.getInstance("AndroidKeyStore").apply { load(null); deleteEntry(ALIAS) }
         entry()
     }
-    fun sign(message: ByteArray): String {
+    fun sign(message: ByteArray, existingOnly: Boolean = false): String {
         val signer = Signature.getInstance("SHA256withECDSA")
-        signer.initSign(entry().privateKey); signer.update(message)
+        signer.initSign(entry(!existingOnly).privateKey); signer.update(message)
         return EnrollmentProof.base64(EnrollmentProof.rawSignature(signer.sign()))
     }
 }

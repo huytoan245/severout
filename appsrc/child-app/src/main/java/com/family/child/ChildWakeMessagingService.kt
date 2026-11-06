@@ -35,7 +35,7 @@ class ChildWakeMessagingService : FirebaseMessagingService() {
         }
         if (!fresh) {
             if (deliveredHigh || RecoveryStarter.isBatteryOptimizationIgnored(app) || LocationService.running) {
-                if (!RecoveryStarter.startLocationService(app,"fcm_duplicate_pending",requestId)) ServiceWatchdogWorker.requestImmediateRecovery(app,"fcm_duplicate_pending")
+                if (!RecoveryStarter.startLocationService(app,if(deliveredHigh)"fcm_high" else "fcm_duplicate_pending",requestId)) ServiceWatchdogWorker.requestImmediateRecovery(app,"fcm_duplicate_pending")
             } else ServiceWatchdogWorker.requestImmediateRecovery(app,"fcm_duplicate_pending")
             return
         }

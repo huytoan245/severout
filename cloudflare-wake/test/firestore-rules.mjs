@@ -41,6 +41,10 @@ try {
   await deny(setDoc(doc(child,path),{ refreshResult:'locating' },{merge:true}));
   await pass(setDoc(doc(child,path),{ locationTime:now },{merge:true}));
   await deny(setDoc(doc(child,path),{ locationTime:now-1 },{merge:true}));
+  const recovery={bootObservedAt:now,bootRecoveryResult:'background_permission_missing',recoveryAttemptAt:now,recoveryResult:'blocked',recoveryErrorCode:'background_permission_missing',serviceConfirmedAt:0,trackingRegistered:false,trackingRegisteredAt:0,lastTrackingCallbackAt:0,trackingRecoveryAt:0,trackingErrorCode:'',appVersion:'2.3.3',appVersionCode:37};
+  await pass(setDoc(doc(child,path),recovery,{merge:true}));
+  await deny(setDoc(doc(parent,path),{...recovery,recoveryResult:'forged'}, {merge:true}));
+  await deny(setDoc(doc(stranger,path),recovery,{merge:true}));
   await deny(setDoc(doc(child,path),{ fcmToken:'same-revision-other-token',fcmTokenGeneration:2 },{merge:true}));
   await deny(setDoc(doc(child,path),{ fcmToken:'clean-install-token',fcmTokenGeneration:3000,fcmTokenOwnerUid:'test-child' },{merge:true}));
   await pass(setDoc(doc(child,path+'/events/id'),{type:'location_sample',id:'sample-id',time:now,lat:20.0,lon:105.0}));

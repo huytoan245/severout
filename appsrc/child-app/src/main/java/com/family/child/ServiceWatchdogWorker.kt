@@ -16,6 +16,7 @@ import androidx.work.Worker
 import androidx.work.WorkerParameters
 import androidx.work.workDataOf
 import java.util.concurrent.TimeUnit
+import com.family.core.RecoveryV233
 
 /**
  * Secondary liveness watchdog. The main LocationService remains primary.
@@ -28,7 +29,7 @@ class ServiceWatchdogWorker(
 ) : Worker(appContext, params) {
 
     override fun doWork(): Result {
-        if (runAttemptCount >= 8) return Result.failure()
+        if (runAttemptCount >= 4) return Result.failure()
         val app = applicationContext
         val now = System.currentTimeMillis()
         val prefs = app.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -36,6 +37,8 @@ class ServiceWatchdogWorker(
         val lastLocalHeartbeatAt = prefs.getLong(KEY_LAST_LOCAL_HEARTBEAT_AT, 0L)
         val stale = !LocationService.running || lastLocalHeartbeatAt <= 0L || now - lastLocalHeartbeatAt >= LOCAL_HEARTBEAT_STALE_MS
         val recoveryRequested = trigger != "periodic"
+        val registered=prefs.getBoolean("trackingRegistered",false)
+        val gpsStale=RecoveryV233.trackingStale(now,prefs.getLong("trackingRegisteredAt",0),prefs.getLong("lastTrackingCallbackAt",0),prefs.getLong("trackingRecoveryAt",0))
 
         UnusedAppRestrictionProbe.refresh(app)
         WakeTokenSyncWorker.ensurePeriodic(app)
@@ -47,7 +50,15 @@ class ServiceWatchdogWorker(
             .apply()
 
         if (stale) RecoveryGeofenceManager.rearmLatestObserved(app, "watchdog")
-        if (!stale && !recoveryRequested) {
+        if(inputData.getBoolean("verify_service_start",false)){
+            val verified=RecoveryV233.verified(LocationService.running,lastLocalHeartbeatAt,registered,now)
+            prefs.edit().putString("recoveryResult",if(verified)"service_and_subscription_confirmed" else "start_unconfirmed")
+                .putString("recoveryErrorCode",if(verified)"" else "service_or_subscription_unconfirmed").apply()
+            RecoveryTelemetry.publish(app)
+            if(verified)return Result.success()
+            // This delayed worker has no BOOT/FCM exemption of its own.
+        }
+        if (!stale && registered && !gpsStale && !recoveryRequested) {
             prefs.edit().putString(KEY_WATCHDOG_RESULT, "service_alive").apply()
             return Result.success()
         }
@@ -64,19 +75,9 @@ class ServiceWatchdogWorker(
             .putBoolean(KEY_BACKGROUND_RESTRICTED, backgroundRestricted)
             .apply()
 
-        if (!fine || !background || backgroundRestricted) {
-            prefs.edit().putString(KEY_WATCHDOG_RESULT, "blocked_permissions_or_restricted").apply()
-            return Result.success()
-        }
-
         // Android lists battery-optimization exemption as an allowed background
         // foreground-service start condition. Without it, repeated blind starts
         // only create ForegroundServiceStartNotAllowedException and waste battery.
-        if (!batteryExempt) {
-            prefs.edit().putString(KEY_WATCHDOG_RESULT, "waiting_battery_exemption").apply()
-            return Result.success()
-        }
-
         ProtectionNotifier.ensureVisible(app, "watchdog_$trigger")
         val started = RecoveryStarter.startLocationService(app, "watchdog_$trigger")
         return if (started) {
@@ -90,7 +91,9 @@ class ServiceWatchdogWorker(
                 .putString(KEY_WATCHDOG_RESULT, "restart_failed")
                 .putLong(KEY_WATCHDOG_RESTART_FAILED_AT, now)
                 .apply()
-            if (recoveryRequested) Result.retry() else Result.success()
+            val code=prefs.getString("recoveryErrorCode","")?:""
+            RecoveryTelemetry.publish(app)
+            if (RecoveryV233.retry(runAttemptCount,code)) Result.retry() else Result.success()
         }
     }
 
@@ -120,6 +123,13 @@ class ServiceWatchdogWorker(
                 ExistingPeriodicWorkPolicy.KEEP,
                 request
             )
+        }
+
+        fun verifyStart(context:Context,requestedAt:Long){
+            WorkManager.getInstance(context.applicationContext).enqueueUniqueWork("family-service-start-verification-v233",ExistingWorkPolicy.KEEP,
+                OneTimeWorkRequestBuilder<ServiceWatchdogWorker>().setInitialDelay(20,TimeUnit.SECONDS)
+                    .setInputData(workDataOf("verify_service_start" to true,"requested_at" to requestedAt,KEY_RECOVERY_REASON to "verify_start"))
+                    .setBackoffCriteria(androidx.work.BackoffPolicy.EXPONENTIAL,30,TimeUnit.SECONDS).build())
         }
 
         fun requestImmediateRecovery(context: Context, reason: String) {

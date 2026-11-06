@@ -161,12 +161,9 @@ class MainActivity : ComponentActivity() {
         // Subsequent opens record missing prerequisites without repeating setup UI.
         if (fineGranted) {
             try {
-                ContextCompat.startForegroundService(
-                    this,
-                    Intent(this, LocationService::class.java).putExtra("immediate", true)
-                )
+                val requested=RecoveryStarter.startLocationService(this,"app_visible")
                 getSharedPreferences(PREFS, MODE_PRIVATE).edit()
-                    .putString("silent_start_result", "requested")
+                    .putString("silent_start_result", if(requested) "requested" else "blocked")
                     .apply()
             } catch (e: Exception) {
                 getSharedPreferences(PREFS, MODE_PRIVATE).edit()
