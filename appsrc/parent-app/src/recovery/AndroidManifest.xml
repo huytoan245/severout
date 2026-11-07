@@ -1,0 +1,16 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.INTERNET"/>
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+    <application android:allowBackup="false" android:icon="@drawable/ic_guardian_shield" android:roundIcon="@drawable/ic_guardian_shield" android:theme="@style/Theme.FamilyParent" android:label="Kết Nối">
+        <meta-data android:name="family.update_in_place" android:value="true"/>
+        <meta-data android:name="family.parent_recovery" android:value="true"/>
+        <activity android:name=".RecoveryActivity" android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN"/>
+                <category android:name="android.intent.category.LAUNCHER"/>
+            </intent-filter>
+        </activity>
+        <activity android:name=".MainActivity" android:exported="false"/>
+    </application>
+</manifest>

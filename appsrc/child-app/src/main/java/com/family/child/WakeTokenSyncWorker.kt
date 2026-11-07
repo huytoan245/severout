@@ -53,7 +53,7 @@ class WakeTokenSyncWorker(appContext: Context, params: WorkerParameters) : Worke
             if (confirmed.optBoolean("confirmed") && confirmed.optLong("generation") == current.generation && stillCurrent() && TokenState.confirm(app, current)) {
                 // Token ownership and revision are now server-owned. This write
                 // contains only ordinary Child diagnostics.
-                doc.set(SetupDiagnostics.fields(app) + mapOf("fcmWakeClientVersion" to BuildConfig.VERSION_NAME,
+                doc.set(SetupDiagnostics.fields(app) + RecoveryTelemetry.fields(app) + mapOf("fcmWakeClientVersion" to BuildConfig.VERSION_NAME,
                     "fcmTokenSyncProtocol" to "v232-device-binding"), SetOptions.merge())
                 status("backend_device_key_verified"); return Result.success()
             }

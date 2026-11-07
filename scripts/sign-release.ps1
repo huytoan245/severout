@@ -4,7 +4,7 @@ param(
     [Parameter(Mandatory=$true)][string]$AndroidSdk,
     [Parameter(Mandatory=$true)][string]$JavaHome,
     [string]$UnsignedDirectory,
-    [ValidateSet('2.3.0','2.3.1','2.3.2')][string]$Version = '2.3.0',
+    [ValidateSet('2.3.0','2.3.1','2.3.2','2.3.3')][string]$Version = '2.3.0',
     [string]$BuildToolsVersion,
     [switch]$UpdateInPlace,
     [switch]$CheckEnvironmentOnly
@@ -13,7 +13,7 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'ReleaseSigning.Common.ps1')
 . (Join-Path $PSScriptRoot 'Bootstrap.Common.ps1')
 if ($Version -ceq '2.3.2') { . (Join-Path $PSScriptRoot 'Bootstrap.V232.Common.ps1') }
-$VersionCode = if ($Version -ceq '2.3.2') { 36 } elseif ($Version -ceq '2.3.1') { 35 } else { 34 }
+$VersionCode = if ($Version -ceq '2.3.3') { 37 } elseif ($Version -ceq '2.3.2') { 36 } elseif ($Version -ceq '2.3.1') { 35 } else { 34 }
 $releaseTag = $Version.Replace('.', '')
 if (-not $UnsignedDirectory) { $UnsignedDirectory = Join-Path $PSScriptRoot ('..\out\v' + $releaseTag) }
 $repo = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
@@ -53,10 +53,11 @@ foreach ($app in @('Parent', 'Child')) {
 }
 if ($Version -ceq '2.3.1') { Assert-BootstrapApkPair $UnsignedDirectory }
 if($UpdateInPlace){
-    if($Version -cne '2.3.2'){throw 'UPDATE_IN_PLACE is supported only by v2.3.2 gate'}
+    if($Version -cnotin @('2.3.2','2.3.3')){throw 'Unsupported UPDATE_IN_PLACE version'}
     . (Join-Path $PSScriptRoot 'UpdateRelease.Common.ps1')
-    Assert-UpdateInPlaceApkPair $UnsignedDirectory $tools.Aapt2
+    Assert-UpdateInPlaceApkPair $UnsignedDirectory $tools.Aapt2 $Version
 }elseif ($Version -ceq '2.3.2') { Assert-BootstrapApkPairV232 $UnsignedDirectory }
+if($Version -ceq '2.3.3' -and -not $UpdateInPlace){throw 'v2.3.3 requires UPDATE_IN_PLACE; identity recovery requires separate approval'}
 if ($CheckEnvironmentOnly) { Write-Output 'Environment/unsigned input gates PASS. No password read, keystore inspection/signing or Installable publication performed.'; return }
 $stage = Join-Path ([IO.Path]::GetTempPath()) ('family-location-sign-' + [guid]::NewGuid().ToString('N'))
 $previous = $env:FAMILY_LOCATION_KS_PASSWORD

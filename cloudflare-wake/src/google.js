@@ -118,7 +118,9 @@ export class GoogleApi {
     return { generation: payload.generation, confirmed: true };
   }
   async rebindIdentity(previous, next, role, audit) {
-    const writes=[{update:{name:this.familyUrl().split('/v1/')[1],fields:this.fields(next)},currentDocument:{updateTime:previous.updateTime}},
+    const parentMask=role==='parent' && audit.approvedRevision ? ['epoch','parentUid','parentKey','parentRebindGeneration','parentReboundAt','parentRebindProofHash','retiredUidHashes','retiredKeyHashes'] : null;
+    const familyValues=parentMask?Object.fromEntries(parentMask.map(key=>[key,next[key]])):next;
+    const writes=[{update:{name:this.familyUrl().split('/v1/')[1],fields:this.fields(familyValues)},...(parentMask?{updateMask:{fieldPaths:parentMask}}:{}),currentDocument:{updateTime:previous.updateTime}},
       {update:{name:this.familyUrl().split('/v1/')[1].replace('/families/family-01',`/familyRebind/${next.epoch}-${role}`),fields:this.fields({...audit,role,epoch:next.epoch,rebindGeneration:next[role+'RebindGeneration']})},currentDocument:{exists:false}}];
     if(role==='child') {
       const d=await this.readDocument(this.docUrl());

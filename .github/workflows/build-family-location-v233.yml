@@ -1,0 +1,83 @@
+name: Build Family Location v2.3.3 Reboot Parent Recovery
+on:
+  pull_request:
+    branches: [codex/v232-reliable-gps-journey]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      WRANGLER_SEND_METRICS: 'false'
+      FAMILY_LOCATION_PARENT_BOOTSTRAP: ''
+      FAMILY_LOCATION_CHILD_BOOTSTRAP: ''
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Worker auth/retry/runtime and Firestore rules regression
+        working-directory: cloudflare-wake
+        run: |
+          mkdir -p ../out
+          npm ci --ignore-scripts
+          npm test | tee ../out/worker-tests.log
+          npm run check
+          npm run dry-run
+          npm run test:runtime | tee ../out/runtime-smoke.log
+          node render-rules.mjs --output .wrangler/test-fixture.rules
+          npx --yes firebase-tools@15.32.1 emulators:exec --only firestore --project demo-family-location-wake --config firebase-test.json 'node test/firestore-rules.mjs' | tee ../out/rules-emulator.log
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: 'platform-tools'
+      - run: sdkmanager "platforms;android-36" "build-tools;36.0.0" "platform-tools"
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.5.0'
+      - name: Validate tracked canonical source
+        run: python3 -X utf8 scripts/reconstruct.py
+      - name: Static product/secret boundary and recovery validation
+        run: python3 -X utf8 scripts/validate.py
+      - name: Existing signer recovery and paired signing gate regression (no private key)
+        shell: pwsh
+        run: |
+          ./scripts/test-release-signing.ps1 -JavaHome $env:JAVA_HOME | Tee-Object -FilePath out/signing-regression.log
+          ./scripts/test-bootstrap.ps1
+          ./scripts/test-bootstrap-v232.ps1
+      - name: Ephemeral CI operator transport key (not a release signer)
+        run: |
+          openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out "$RUNNER_TEMP/recovery-fixture.pem" 2>/dev/null
+          openssl pkey -in "$RUNNER_TEMP/recovery-fixture.pem" -pubout -outform DER | base64 -w0 > "$RUNNER_TEMP/operator-public.txt"
+          echo "FAMILY_RECOVERY_OPERATOR_PUBLIC_KEY=$(cat "$RUNNER_TEMP/operator-public.txt")" >> "$GITHUB_ENV"
+      - name: Parent Recovery tests, build and lint; Child regression only
+        working-directory: appsrc
+        run: gradle -PupdateInPlace=true -PparentRecovery=true -I ../scripts/capture-build-tools.gradle captureSigningBuildTools -PfamilySigningMetadata="$GITHUB_WORKSPACE/out/ANDROID-BUILD-TOOLS.json" :core:coreSelfCheck :core:scenarioCheck :enrollment:testDebugUnitTest :child-app:testDebugUnitTest :parent-app:testDebugUnitTest :parent-app:assembleRelease :enrollment:lintRelease :parent-app:lintRelease :child-app:lintRelease --console=plain --stacktrace | tee ../out/android-build.log
+      - name: Collect only separately gated Parent Recovery (CI key, no phone use)
+        run: |
+          python3 -X utf8 scripts/prepare-parent-recovery.py --build-root appsrc --evidence-root out --output-directory out/parent-recovery --operator-public-key "$RUNNER_TEMP/operator-public.txt"
+          "$ANDROID_HOME/build-tools/36.0.0/zipalign" -c -P 16 4 out/parent-recovery/Family-Parent-v2.3.3-Recovery-unsigned.apk
+          echo 'REVIEW ONLY: ephemeral CI report key. Use locally built operator-case APK, local signing and separate recovery approval. No Child APK is emitted.' > out/parent-recovery/CI-REVIEW-ONLY.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: family-location-v2.3.3-parent-recovery-review
+          path: out/parent-recovery/
+          retention-days: 14
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: family-location-v2.3.3-test-reports
+          path: |
+            appsrc/enrollment/build/reports/tests/
+            appsrc/child-app/build/reports/tests/
+            appsrc/parent-app/build/reports/tests/
+            appsrc/parent-app/build/reports/lint-results-release.*

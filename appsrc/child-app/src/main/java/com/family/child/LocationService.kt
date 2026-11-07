@@ -72,6 +72,12 @@ class LocationService : Service() {
     private var acquisitionToken: CancellationTokenSource? = null
     @Volatile private var lastCloudHeartbeatSuccessAt = 0L
     private var trackingActive = false
+    private var trackingRegistering = false
+    private var lastTrackingAttemptElapsed = -60_000L
+    private var trackingGeneration = 0L
+    private var trackingRegisteredAt = 0L
+    @Volatile private var lastTrackingCallbackAt = 0L
+    private var trackingRecoveryAt = 0L
     private fun background(block: () -> Unit) {
         if (destroyed) return
         try { io.execute { if (!destroyed) block() } } catch (_: RejectedExecutionException) { }
@@ -145,6 +151,7 @@ class LocationService : Service() {
             return@Runnable
         }
         publishLocalStatus("network_recovery")
+        evaluateTrackingHealth()
         cloud.enableNetwork()
         if (cloudIdentityReady()) {
             listenCommands()
@@ -173,15 +180,20 @@ class LocationService : Service() {
     private val callback = object : LocationCallback() {
         override fun onLocationResult(result: LocationResult) {
             lastGpsCallbackAt = System.currentTimeMillis()
+            lastTrackingCallbackAt=lastGpsCallbackAt
+            getSharedPreferences("tracking_diag",MODE_PRIVATE).edit().putLong("lastTrackingCallbackAt",lastTrackingCallbackAt).apply()
             result.locations.forEach { handleCandidate(it, null) }
         }
     }
 
     override fun onCreate() {
         super.onCreate()
+        val recoveryPrefs=getSharedPreferences("tracking_diag",MODE_PRIVATE)
+        recoveryPrefs.edit().putBoolean("trackingRegistered",false).apply()
         // Meet the promotion deadline before database/SDK/job/geofence work.
         try { startAsForeground(); running = true }
-        catch (e: Exception) { publishLocalStatus("foreground_start_failed:${e.javaClass.simpleName}"); stopSelf(); return }
+        catch (e: Exception) { recoveryPrefs.edit().putString("recoveryResult","foreground_promotion_rejected").putString("recoveryErrorCode",if(e is SecurityException)"fgs_security_exception" else "fgs_promotion_failed").apply();RecoveryTelemetry.publish(this);publishLocalStatus("foreground_start_failed:${e.javaClass.simpleName}"); stopSelf(); return }
+        recoveryPrefs.edit().putLong("serviceConfirmedAt",System.currentTimeMillis()).putString("recoveryResult","service_confirmed").apply()
         journalThread.start()
         journalHandler = Handler(journalThread.looper)
         serviceStartedAt = System.currentTimeMillis()
@@ -388,7 +400,8 @@ class LocationService : Service() {
     }
 
     private fun requestTracking() {
-        if (trackingActive) return
+        if (trackingActive || trackingRegistering) return
+        if(SystemClock.elapsedRealtime()-lastTrackingAttemptElapsed<60_000L)return
         if (!hasFineLocation()) { publishLocalStatus("location_permission_missing"); return }
         if (!isLocationEnabled()) { publishLocalStatus("location_off"); return }
         val request = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, JourneyPolicy.interval(trackingMoving))
@@ -398,14 +411,38 @@ class LocationService : Service() {
             .setWaitForAccurateLocation(false)
             .build()
         try {
-            trackingActive = true
+            lastTrackingAttemptElapsed=SystemClock.elapsedRealtime()
+            trackingRegistering=true
+            val generation=++trackingGeneration
             client.requestLocationUpdates(request, callback, journalThread.looper)
-                .addOnFailureListener { e -> trackingActive = false; publishLocalStatus("tracking_register:${e.javaClass.simpleName}") }
-            publishLocalStatus("tracking")
+                .addOnSuccessListener {
+                    if(destroyed||generation!=trackingGeneration)return@addOnSuccessListener
+                    trackingRegistering=false;trackingActive=true;trackingRegisteredAt=System.currentTimeMillis()
+                    getSharedPreferences("tracking_diag",MODE_PRIVATE).edit().putBoolean("trackingRegistered",true).putLong("trackingRegisteredAt",trackingRegisteredAt).putString("trackingErrorCode","").apply()
+                    RecoveryTelemetry.publish(this);publishLocalStatus("tracking")
+                }
+                .addOnFailureListener { e -> if(generation==trackingGeneration){trackingRegistering=false;trackingActive = false;getSharedPreferences("tracking_diag",MODE_PRIVATE).edit().putBoolean("trackingRegistered",false).putString("trackingErrorCode","gps_subscription_failed").apply();publishLocalStatus("tracking_register:${e.javaClass.simpleName}")} }
+            handler.postDelayed({if(!destroyed && generation==trackingGeneration && trackingRegistering){trackingGeneration++;trackingRegistering=false;trackingActive=false;getSharedPreferences("tracking_diag",MODE_PRIVATE).edit().putBoolean("trackingRegistered",false).putString("trackingErrorCode","gps_subscription_timeout").apply();RecoveryTelemetry.publish(this)}},20_000L)
         } catch (e: SecurityException) {
             trackingActive = false
+            trackingRegistering=false
+            getSharedPreferences("tracking_diag",MODE_PRIVATE).edit().putBoolean("trackingRegistered",false).putString("trackingErrorCode","gps_permission_denied").apply()
             publishLocalStatus("tracking_security:${e.javaClass.simpleName}")
+        } catch (_: Exception) {
+            trackingActive=false;trackingRegistering=false
+            getSharedPreferences("tracking_diag",MODE_PRIVATE).edit().putBoolean("trackingRegistered",false).putString("trackingErrorCode","gps_subscription_failed").apply()
+            RecoveryTelemetry.publish(this)
         }
+    }
+
+    private fun restartTracking(reason:String) {
+        if(destroyed || trackingRegistering)return
+        trackingActive=false;trackingRegistering=true
+        val generation=++trackingGeneration
+        getSharedPreferences("tracking_diag",MODE_PRIVATE).edit().putBoolean("trackingRegistered",false).putString("trackingErrorCode",reason).apply()
+        val finish={if(!destroyed && generation==trackingGeneration && trackingRegistering){trackingRegistering=false;requestTracking()}}
+        try{client.removeLocationUpdates(callback).addOnCompleteListener{finish()}}catch(_:Exception){finish()}
+        handler.postDelayed({finish()},20_000L)
     }
 
     private fun evaluateTrackingHealth() {
@@ -415,6 +452,11 @@ class LocationService : Service() {
         val fine = hasFineLocation()
         val locationOn = isLocationEnabled()
         val elapsed = SystemClock.elapsedRealtime()
+        if(fine && locationOn && trackingActive && RecoveryV233.trackingStale(System.currentTimeMillis(),trackingRegisteredAt,lastTrackingCallbackAt,trackingRecoveryAt)){
+            trackingRecoveryAt=System.currentTimeMillis()
+            getSharedPreferences("tracking_diag",MODE_PRIVATE).edit().putLong("trackingRecoveryAt",trackingRecoveryAt).apply()
+            restartTracking("tracking_callback_stale")
+        }
         // A distance-filtered stationary callback can legitimately be quiet.
         // Infrequent fresh acquisition checks the provider without claiming it died.
         if (fine && locationOn && trackingActive && !acquiring && elapsed - lastFreshFixAttemptElapsed >= 10 * 60_000L &&
@@ -422,11 +464,13 @@ class LocationService : Service() {
         val signature = "$fine:$locationOn"
 
         if (!fine || !locationOn) {
-            if (trackingActive) {
+            if (trackingActive || trackingRegistering) {
+                trackingGeneration++;trackingRegistering=false
                 client.removeLocationUpdates(callback)
                 trackingActive = false
+                getSharedPreferences("tracking_diag",MODE_PRIVATE).edit().putBoolean("trackingRegistered",false).putString("trackingErrorCode",if(!fine)"permission_missing" else "location_off").apply()
             }
-        } else if (!trackingActive) {
+        } else if (!trackingActive && !trackingRegistering) {
             requestTracking()
             requestImmediate(null)
         }
@@ -701,7 +745,7 @@ class LocationService : Service() {
         if(sample.moving) lastMovingAt=now
         val shouldMove=sample.moving || now-lastMovingAt<120_000L
         if(shouldMove!=trackingMoving && now-trackingChangedAt>=60_000L){trackingMoving=shouldMove;trackingChangedAt=now
-            handler.post { if(!destroyed){client.removeLocationUpdates(callback);trackingActive=false;requestTracking()} }}
+            handler.post { restartTracking("sampling_changed") }}
         RecoveryGeofenceManager.update(this, l)
 
         val diag = diagnosticFields(now)
@@ -989,7 +1033,7 @@ class LocationService : Service() {
         val locationEnabled = isLocationEnabled()
         val locationOffSince = updateLocationOffSince(now, locationEnabled)
         val failover = failoverManager.snapshot()
-        return mutableMapOf(
+        return mutableMapOf<String,Any?>(
             "diagnosticAt" to now,
             "locationEnabled" to locationEnabled,
             "locationOffSince" to locationOffSince,
@@ -1064,7 +1108,7 @@ class LocationService : Service() {
             "recoveryGeofenceRegisteredAt" to getSharedPreferences("tracking_diag", MODE_PRIVATE).getLong("recovery_geofence_registered_at_v229", 0L),
             "recoveryGeofenceEventAt" to getSharedPreferences("tracking_diag", MODE_PRIVATE).getLong("recovery_geofence_event_at_v229", 0L),
             "lastRecoveryReason" to getSharedPreferences("tracking_diag", MODE_PRIVATE).getString("last_recovery_reason_v229", "unknown")
-        )
+        ).apply { putAll(RecoveryTelemetry.fields(this@LocationService)) }
     }
 
     private fun updateLocationOffSince(now: Long, locationEnabled: Boolean): Long {
@@ -1313,7 +1357,9 @@ class LocationService : Service() {
         getSharedPreferences("tracking_diag", MODE_PRIVATE).edit()
             .putLong(KEY_SERVICE_DESTROYED_AT, System.currentTimeMillis())
             .apply()
-        if (trackingActive) client.removeLocationUpdates(callback)
+        trackingGeneration++;trackingActive=false;trackingRegistering=false
+        getSharedPreferences("tracking_diag",MODE_PRIVATE).edit().putBoolean("trackingRegistered",false).apply()
+        if (::client.isInitialized) client.removeLocationUpdates(callback)
         if (networkCallbackRegistered) {
             try { getSystemService(ConnectivityManager::class.java).unregisterNetworkCallback(networkCallback) } catch (_: Exception) {}
         }

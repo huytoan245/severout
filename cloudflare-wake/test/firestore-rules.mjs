@@ -41,6 +41,10 @@ try {
   await deny(setDoc(doc(child,path),{ refreshResult:'locating' },{merge:true}));
   await pass(setDoc(doc(child,path),{ locationTime:now },{merge:true}));
   await deny(setDoc(doc(child,path),{ locationTime:now-1 },{merge:true}));
+  const recovery={bootObservedAt:now,bootRecoveryResult:'background_permission_missing',recoveryAttemptAt:now,recoveryResult:'blocked',recoveryErrorCode:'background_permission_missing',serviceConfirmedAt:0,trackingRegistered:false,trackingRegisteredAt:0,lastTrackingCallbackAt:0,trackingRecoveryAt:0,trackingErrorCode:'',appVersion:'2.3.3',appVersionCode:37};
+  await pass(setDoc(doc(child,path),recovery,{merge:true}));
+  await deny(setDoc(doc(parent,path),{...recovery,recoveryResult:'forged'}, {merge:true}));
+  await deny(setDoc(doc(stranger,path),recovery,{merge:true}));
   await deny(setDoc(doc(child,path),{ fcmToken:'same-revision-other-token',fcmTokenGeneration:2 },{merge:true}));
   await deny(setDoc(doc(child,path),{ fcmToken:'clean-install-token',fcmTokenGeneration:3000,fcmTokenOwnerUid:'test-child' },{merge:true}));
   await pass(setDoc(doc(child,path+'/events/id'),{type:'location_sample',id:'sample-id',time:now,lat:20.0,lon:105.0}));
@@ -112,5 +116,21 @@ try {
   assert.equal((await readDay(day,day+dayMs)).length,6500);count++;
   assert.equal((await readDay(day+dayMs,day+2*dayMs)).length,900);count++;
   await deny(getDocs(query(collection(stranger,path+'/events'),where('time','>=',day),where('time','<',day+dayMs),orderBy('time'),limit(500))));
+  // Guarded Parent write-mask against actual Firestore: preserve unknown metadata,
+  // Child identity/token, all history; revoke old Parent without deleting Auth.
+  await env.withSecurityRulesDisabled(async context=>setDoc(doc(context.firestore(),'families/family-01'),{operatorPreserved:{nested:[1,2],note:'keep'}},{merge:true}));
+  family=await api.readFamily();
+  const rawBefore=await(await api.call(api.familyUrl())).json(),deviceBefore=await(await api.call(api.docUrl())).json();
+  const recovered={...family,parentUid:'guarded-parent',parentKey:'guarded-parent-key',epoch:family.epoch+1,parentRebindGeneration:1,parentReboundAt:now,parentRebindProofHash:'guarded-proof',retiredUidHashes:'old-parent-hash',retiredKeyHashes:'old-parent-key-hash'};
+  const audit={oldUidHash:'old-parent-hash',oldKeyHash:'old-parent-key-hash',newUidHash:'new-parent-hash',proofHash:'guarded-proof',time:now,approvedRevision:family.updateTime,operationId:'fixture-parent-operation'};
+  assert.equal(await api.rebindIdentity(family,recovered,'parent',audit),true);count++;
+  assert.equal(await api.rebindIdentity(family,recovered,'parent',audit),false);count++;
+  const rawAfter=await(await api.call(api.familyUrl())).json(),devicePreserved=await(await api.call(api.docUrl())).json();
+  assert.deepEqual(Object.fromEntries(Object.entries(rawAfter.fields).filter(([k])=>k.startsWith('child'))),Object.fromEntries(Object.entries(rawBefore.fields).filter(([k])=>k.startsWith('child'))));count++;
+  assert.deepEqual(rawAfter.fields.operatorPreserved,rawBefore.fields.operatorPreserved);count++;
+  assert.deepEqual(devicePreserved.fields,deviceBefore.fields);count++;
+  await deny(getDoc(doc(newParent,path+'/events/id')));
+  await pass(getDoc(doc(env.authenticatedContext('guarded-parent').firestore(),path+'/events/id')));
+  await pass(getDoc(doc(newChild,path+'/events/id')));
   console.log(`PASS: ${count} actual Firestore emulator security-rule assertions. Fixture UIDs/project only; no production writes.`);
 } finally { await env.cleanup(); }

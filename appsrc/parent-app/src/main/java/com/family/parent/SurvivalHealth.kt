@@ -1,7 +1,7 @@
 package com.family.parent
 
 object SurvivalHealth {
-    val fields = listOf("lastValidGpsAt","lastGpsRejectedAt","lastGpsErrorCode","refreshErrorCode","refreshStartErrorCode","refreshValidatedFor","refreshPersistedFor", "refreshUploadedFor", "syncCompletedAt","pendingEventCount", "serviceInstanceId", "serviceStartCount", "serviceRestartCount", "lastLocalServiceHeartbeatAt", "lastGpsCallbackAt",
+    val fields = listOf("bootObservedAt","bootRecoveryResult","recoveryAttemptAt","recoveryResult","recoveryErrorCode","serviceConfirmedAt","trackingRegisteredAt","trackingRegistered","lastTrackingCallbackAt","trackingRecoveryAt","trackingErrorCode","lastValidGpsAt","lastGpsRejectedAt","lastGpsErrorCode","refreshErrorCode","refreshStartErrorCode","refreshValidatedFor","refreshPersistedFor", "refreshUploadedFor", "syncCompletedAt","pendingEventCount", "serviceInstanceId", "serviceStartCount", "serviceRestartCount", "lastLocalServiceHeartbeatAt", "lastGpsCallbackAt",
         "lastCloudHeartbeatAttemptAt", "lastCloudHeartbeatSuccessAt", "processExitReason", "processExitImportance", "watchdogLastRunAt", "watchdogResult",
         "geofenceRegisteredAt", "geofenceTriggeredAt", "fcmTokenConfirmedAt", "fcmWakeReceivedAt", "fcmOriginalPriority", "fcmDeliveredPriority",
         "batteryOptimizationIgnored", "backgroundRestricted", "appStandbyRestricted", "unusedAppRestricted", "unusedAppRestrictionMeaning",

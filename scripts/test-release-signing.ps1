@@ -278,6 +278,32 @@ function Assert-ReleaseArchiveReadable { }
     $updateMarker.bootstrapIncluded=$true
     $updateMarker|ConvertTo-Json -Depth 5|Set-Content -LiteralPath (Join-Path $out 'UPDATE-IN-PLACE.json')
     Reject { & (Join-Path $copy 'scripts/sign-release.ps1') -Version 2.3.2 -UpdateInPlace -KeystorePath $fakeStore -JavaHome $javaDir -AndroidSdk $sdkDir -UnsignedDirectory $out -CheckEnvironmentOnly } 'UPDATE_IN_PLACE cannot reuse a provisioned bootstrap artifact'
+    # v233 keeps the same pair/signer gates and forbids unapproved fresh recovery.
+    $newCommon=(Get-Content -LiteralPath $commonCopy -Raw).Replace("versionCode='36' versionName='2.3.2'","versionCode='37' versionName='2.3.3'")
+    [IO.File]::WriteAllText($commonCopy,$newCommon,[Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText((Join-Path $copy 'docs/RELEASE_SIGNING_V233.md'),'Pinned signer SHA-256: `' + $script:ReleaseFingerprint + '`')
+    $updateGate.VersionName='2.3.3';$updateGate.VersionCode=37
+    $updateGate|ConvertTo-Json -Depth 5|Set-Content -LiteralPath (Join-Path $out 'AUTOMATED-GATE.json')
+    $updateMarker.versionName='2.3.3';$updateMarker.versionCode=37;$updateMarker.bootstrapIncluded=$false
+    $sumLines=foreach($app in @('Parent','Child')){
+        $name="Family-$app-v2.3.3-unsigned.apk"
+        [IO.File]::WriteAllText((Join-Path $out $name),"public v233 mock $app APK - never install")
+        $digest=(Get-FileHash -LiteralPath (Join-Path $out $name)).Hash.ToLowerInvariant()
+        $updateMarker.apks[$app]=$digest
+        $digest+'  '+$name
+    }
+    $sumLines|Set-Content -LiteralPath (Join-Path $out 'SHA256SUMS.txt')
+    $updateMarker|ConvertTo-Json -Depth 5|Set-Content -LiteralPath (Join-Path $out 'UPDATE-IN-PLACE.json')
+    Reject { & (Join-Path $copy 'scripts/sign-release.ps1') -Version 2.3.3 -KeystorePath $fakeStore -JavaHome $javaDir -AndroidSdk $sdkDir -UnsignedDirectory $out -CheckEnvironmentOnly } 'v233 fresh/recovery mode is blocked'
+    foreach($mode in @('child-sign','child-cert','child-verify','child-align')){
+        $env:FAMILY_SIGNING_TEST_MODE=$mode
+        Reject { & (Join-Path $copy 'scripts/sign-release.ps1') -Version 2.3.3 -UpdateInPlace -KeystorePath $fakeStore -JavaHome $javaDir -AndroidSdk $sdkDir -UnsignedDirectory $out } "v233 rejects $mode"
+        Check (@(Get-ChildItem -LiteralPath $out -Filter '*v2.3.3-Installable.apk').Count -eq 0 -and -not(Test-Path -LiteralPath (Join-Path $out 'Family-Location-v2.3.3-Release.zip'))) "v233 no partial publication after $mode"
+    }
+    $env:FAMILY_SIGNING_TEST_MODE='pass'
+    & (Join-Path $copy 'scripts/sign-release.ps1') -Version 2.3.3 -UpdateInPlace -KeystorePath $fakeStore -JavaHome $javaDir -AndroidSdk $sdkDir -UnsignedDirectory $out|Out-Null
+    & (Join-Path $copy 'scripts/validate-signed-release.ps1') -Version 2.3.3 -JavaHome $javaDir -AndroidSdk $sdkDir -Directory $out|Out-Null
+    Check (@(Get-ChildItem -LiteralPath $out -Filter '*v2.3.3-Installable.apk').Count -eq 2) 'v233 both mock outputs and independent validator pass'
     # Reload real helpers, then test inspection with an isolated mocked native reader.
     . (Join-Path $PSScriptRoot 'ReleaseSigning.Common.ps1')
     function Invoke-ReleaseTool {

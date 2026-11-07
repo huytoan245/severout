@@ -10,7 +10,7 @@ def contains(path, values):
     s = path.read_text(encoding='utf-8-sig')
     for value in values: assert value in s, (str(path), value)
     return s
-version, code = ('2.3.2',36) if '--v2210' not in sys.argv and '--v2211' not in sys.argv else (('2.2.10',32) if '--v2210' in sys.argv else ('2.2.11',33))
+version, code = ('2.3.3',37) if '--v2210' not in sys.argv and '--v2211' not in sys.argv else (('2.2.10',32) if '--v2210' in sys.argv else ('2.2.11',33))
 for module, package in [('parent-app','com.family.parent'),('child-app','com.family.child')]:
     contains(root/'appsrc'/module/'build.gradle.kts', [f'applicationId = "{package}"',f'versionCode = {code}',f'versionName = "{version}"'])
     ET.parse(root/'appsrc'/module/'src/main/AndroidManifest.xml')

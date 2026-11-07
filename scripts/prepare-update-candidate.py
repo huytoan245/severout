@@ -4,7 +4,8 @@ import argparse,hashlib,json,re,shutil,subprocess,xml.etree.ElementTree as ET,zi
 
 repo=Path(__file__).resolve().parent.parent
 p=argparse.ArgumentParser();p.add_argument('--build-root',type=Path,required=True);p.add_argument('--evidence-root',type=Path,required=True);p.add_argument('--output-directory',type=Path,required=True)
-a=p.parse_args();build=a.build_root.resolve();evidence=a.evidence_root.resolve();out=a.output_directory.resolve()
+p.add_argument('--version',choices=['2.3.2','2.3.3'],default='2.3.2')
+a=p.parse_args();version=a.version;code={'2.3.2':36,'2.3.3':37}[version];build=a.build_root.resolve();evidence=a.evidence_root.resolve();out=a.output_directory.resolve()
 sha=lambda x:hashlib.sha256(x.read_bytes()).hexdigest()
 def log(name):return (evidence/name).read_text(encoding='utf-8-sig')
 assert 'BUILD SUCCESSFUL' in log('android-build.log') and 'BUILD FAILED' not in log('android-build.log')
@@ -40,17 +41,17 @@ for app,module in [('Parent','parent-app'),('Child','child-app')]:
     manifests=list((build/module/'build/intermediates/merged_manifests/release').rglob('AndroidManifest.xml'))
     assert len(manifests)==1
     manifest=ET.parse(manifests[0]).getroot();ns='{http://schemas.android.com/apk/res/android}'
-    assert manifest.attrib['package']=='com.family.'+app.lower() and manifest.attrib[ns+'versionCode']=='36' and manifest.attrib[ns+'versionName']=='2.3.2'
+    assert manifest.attrib['package']=='com.family.'+app.lower() and manifest.attrib[ns+'versionCode']==str(code) and manifest.attrib[ns+'versionName']==version
     flags=[m.get(ns+'value') for m in manifest.findall('application/meta-data') if m.get(ns+'name')=='family.update_in_place'];assert flags==['true']
     apk=build/module/f'build/outputs/apk/release/{module}-release-unsigned.apk'
     with zipfile.ZipFile(apk) as z:
         assert z.testzip() is None
         assert not any(n.lower().endswith(('.jks','.keystore','.pem','.key')) or 'bootstrap.private' in n.lower() or 'service-account' in n.lower() for n in z.namelist())
-    name=f'Family-{app}-v2.3.2-unsigned.apk';shutil.copy2(apk,out/name);hashes[app]=sha(out/name);sums.append(hashes[app]+'  '+name)
+    name=f'Family-{app}-v{version}-unsigned.apk';shutil.copy2(apk,out/name);hashes[app]=sha(out/name);sums.append(hashes[app]+'  '+name)
 commit=subprocess.check_output(['git','rev-parse','HEAD'],cwd=repo,text=True).strip()
-gate={'status':'PASS','VersionName':'2.3.2','VersionCode':36,'ReleaseMode':'UPDATE_IN_PLACE','commit':commit,'inputHashes':inputs,'workerTests':worker,'rulesAssertions':rules,'signingRegressions':signing,'tests':tests,'lint':lint,'physical':'READY FOR DEVICE TEST','productionDeployment':'NOT PERFORMED'}
+gate={'status':'PASS','VersionName':version,'VersionCode':code,'ReleaseMode':'UPDATE_IN_PLACE','commit':commit,'inputHashes':inputs,'workerTests':worker,'rulesAssertions':rules,'signingRegressions':signing,'tests':tests,'lint':lint,'physical':'READY FOR DEVICE TEST','productionDeployment':'NOT PERFORMED'}
 (out/'AUTOMATED-GATE.json').write_text(json.dumps(gate,indent=2)+'\n',encoding='utf-8')
-(out/'UPDATE-IN-PLACE.json').write_text(json.dumps({'mode':'UPDATE_IN_PLACE','versionName':'2.3.2','versionCode':36,'bootstrapIncluded':False,'existingEnrollmentRequired':True,'apks':hashes,'commit':commit},indent=2)+'\n',encoding='utf-8')
+(out/'UPDATE-IN-PLACE.json').write_text(json.dumps({'mode':'UPDATE_IN_PLACE','versionName':version,'versionCode':code,'bootstrapIncluded':False,'existingEnrollmentRequired':True,'apks':hashes,'commit':commit},indent=2)+'\n',encoding='utf-8')
 (out/'SHA256SUMS.txt').write_text('\n'.join(sums)+'\n',encoding='utf-8')
 for name in ['ANDROID-BUILD-TOOLS.json','android-build.log','worker-tests.log','rules-emulator.log','signing-regression.log','runtime-smoke.log']:
     if (evidence/name).resolve()!=(out/name).resolve():shutil.copy2(evidence/name,out/name)

@@ -57,8 +57,8 @@ export function harness() {
   };
   const env = { ENROLLMENT_ENABLED: 'true', DEVICE_BINDING_PEPPER:b64(crypto.getRandomValues(new Uint8Array(32))), WAKE_STATE: { idFromName: n => n, get: () => ({ fetch: async r => { sent.push(await r.json()); return Response.json({ requestId: String(NOW), status: 'accepted' }); } }) } };
   let registry = new FamilyRegistry({ storage }, env, api, () => now);
-  const call = async (who, operation, body = {}) => {
-    const response = await registry.fetch(new Request('https://internal', { method: 'POST', body: JSON.stringify({ uid: who.uid, operation, body }) }));
+  const call = async (who, operation, body = {}, guard = null, approval = null) => {
+    const response = await registry.fetch(new Request('https://internal', { method: 'POST', body: JSON.stringify({ uid: who.uid, operation, body, guard, approval }) }));
     return { status: response.status, body: await response.json() };
   };
   const proof = async (who, purpose, payload) => {

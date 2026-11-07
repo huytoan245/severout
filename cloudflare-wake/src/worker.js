@@ -1,4 +1,6 @@
 import { ApiError, FirebaseVerifier } from './google.js';
+import {recoveryGuard} from './recovery-guard.js';
+import {approvalEnvelope,recoveryCapability} from './recovery-approval.js';
 export { WakeCoordinator } from './coordinator.js';
 export { FamilyRegistry } from './enrollment.js';
 const verifier = new FirebaseVerifier();
@@ -15,7 +17,7 @@ export async function readBody(request) {
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
-    if (url.pathname === '/health' && request.method === 'GET') return Response.json({ service: 'family-location-wake', version: '2.3.2', configured: Boolean(env.GOOGLE_SERVICE_ACCOUNT_JSON && env.DEVICE_BINDING_PEPPER) }, { headers: { 'Cache-Control': 'no-store' } });
+    if (url.pathname === '/health' && request.method === 'GET') return Response.json({ service: 'family-location-wake', version: '2.3.2', configured: Boolean(env.GOOGLE_SERVICE_ACCOUNT_JSON && env.DEVICE_BINDING_PEPPER), ...await recoveryCapability(env) }, { headers: { 'Cache-Control': 'no-store' } });
     const operation = routes[url.pathname];
     if (!operation || url.search) return Response.json({ error: 'not_found' }, { status: 404 });
     const method = ['state', 'diagnostics'].includes(operation) ? 'GET' : 'POST';
@@ -26,8 +28,21 @@ export default {
       if (!match) throw new ApiError('unauthorized', 401);
       const uid = await verifier.verify(match[1]);
       const body = method === 'POST' ? await readBody(request) : {};
+      let guard=null;
+      let approval=null;
+      const encoded=request.headers.get('X-Family-Recovery-Guard');
+      if(encoded!=null){
+        if(encoded.length>1024 || !/^[A-Za-z0-9_-]+$/.test(encoded))throw new ApiError('invalid_recovery_guard',400);
+        try{guard=recoveryGuard(JSON.parse(atob(encoded.replace(/-/g,'+').replace(/_/g,'/'))));}catch{throw new ApiError('invalid_recovery_guard',400);}
+        if(!guard || !(operation==='rebindParent'||(operation==='challenge' && body.role==='parent' && body.purpose==='rebind')))throw new ApiError('invalid_recovery_guard',400);
+      }
+      const encodedApproval=request.headers.get('X-Family-Recovery-Approval');
+      if(encodedApproval!=null){
+        if(!guard||encodedApproval.length>8192||!/^[A-Za-z0-9_-]+$/.test(encodedApproval))throw new ApiError('invalid_operator_approval',400);
+        try{approval=approvalEnvelope(JSON.parse(atob(encodedApproval.replace(/-/g,'+').replace(/_/g,'/'))));}catch{throw new ApiError('invalid_operator_approval',400);}
+      }
       const stub = env.FAMILY_REGISTRY.get(env.FAMILY_REGISTRY.idFromName('family-01'));
-      return await stub.fetch(new Request('https://registry.internal', { method: 'POST', body: JSON.stringify({ uid, operation, body }) }));
+      return await stub.fetch(new Request('https://registry.internal', { method: 'POST', body: JSON.stringify({ uid, operation, body, guard, approval }) }));
     } catch (e) { return Response.json({ error: e instanceof ApiError ? e.code : 'backend_unavailable' }, { status: e instanceof ApiError ? e.status : 503, headers: { 'Cache-Control': 'no-store' } }); }
   }
 };
