@@ -31,6 +31,7 @@ try{
  }
  WriteEnvelope
  $checked=Test-RecoveryReport $case $reportPath $snapshot $pepperPath
+ Check ($checked.Safe.revision-is[string]-and$checked.Safe.revision-ceq'2026-11-06T08:00:00.123456Z') 'Firestore revision remains an exact string including microseconds'
  Check ($checked.Safe.eligibleForReview-and$checked.Safe.authPresent-and$checked.Safe.authMatchesParent) 'Retained Auth plus absent key is distinguished and binding matches'
  Check (-not(Get-Content -LiteralPath $reportPath -Raw).Contains('fixture-parent')) 'Transfer report has no plaintext identity'
  $report.uid=$null;WriteEnvelope;$checked=Test-RecoveryReport $case $reportPath $snapshot $pepperPath
@@ -52,6 +53,30 @@ try{
  $family.fields.childKey.stringValue=$family.fields.parentKey.stringValue;$family|ConvertTo-Json -Depth 5|Set-Content -LiteralPath $familyPath
  Check (-not(Test-RecoveryReport $case $reportPath $snapshot $pepperPath).Safe.eligibleForReview) 'Shared Parent/Child key stops to preserve Child access'
  Check (-not(Test-Path -LiteralPath (Join-Path $case 'Parent-only-approval.json'))) 'No approval produced by tests'
+ # Explicit consent below applies only to this disposable fixture case.
+ function Read-Host {param($Prompt) 'APPROVE_PARENT_ONLY_REBIND'}
+ try{
+  $family.fields.childKey.stringValue='fixture-child-key';$family.updateTime='2026-11-06T08:00:00.123456Z';$family|ConvertTo-Json -Depth 5|Set-Content -LiteralPath $familyPath
+  $approveArgs=@{Directory=$case;EncryptedReport=$reportPath;SnapshotDirectory=$snapshot;PepperPath=$pepperPath;ConfirmOriginalPhoneProfile=$true;ExpectedRevision='2026-11-06T08:00:00.123456Z';ExpectedEpoch=3;ExpectedGeneration=0}
+  & (Join-Path $PSScriptRoot 'approve-parent-recovery.ps1') @approveArgs|Out-Null
+  $grant=Get-Content -LiteralPath (Join-Path $case 'Parent-only-approval.json') -Raw|ConvertFrom-Json
+  $grantBytes=[Convert]::FromBase64String($grant.payload);$grantText=[Text.Encoding]::UTF8.GetString($grantBytes)
+  Check ((Get-RecoveryJsonString $grantText 'revision')-ceq$approveArgs.ExpectedRevision) 'Issued approval preserves the reviewed revision wire string'
+  $reader=Read-RecoveryPrivateRsa $case
+  try{Check ($reader.VerifyData($grantBytes,[Convert]::FromBase64String($grant.signature),[Security.Cryptography.HashAlgorithmName]::SHA256,[Security.Cryptography.RSASignaturePadding]::Pkcs1)) 'Exact-revision fixture approval signature verifies'}finally{$reader.Dispose()}
+  $summaryPath=Join-Path $snapshot 'READONLY-SUMMARY.json';$summaryText=Get-Content -LiteralPath $summaryPath -Raw;$summary=$summaryText|ConvertFrom-Json
+  $summary.checkedAt=[DateTimeOffset]::UtcNow.AddMinutes(-6).ToString('o');$summary|ConvertTo-Json|Set-Content -LiteralPath $summaryPath
+  Reject {& (Join-Path $PSScriptRoot 'approve-parent-recovery.ps1') @approveArgs} 'Stale snapshot rejects approval despite matching revision'
+  $summary.checkedAt=[DateTimeOffset]::UtcNow.AddMinutes(5).ToString('o');$summary|ConvertTo-Json|Set-Content -LiteralPath $summaryPath
+  Reject {& (Join-Path $PSScriptRoot 'approve-parent-recovery.ps1') @approveArgs} 'Future-dated snapshot rejects approval'
+  Set-Content -LiteralPath $summaryPath -Value $summaryText
+  & (Join-Path $PSScriptRoot 'approve-parent-recovery.ps1') @approveArgs|Out-Null
+  $renewed=@(Get-ChildItem -LiteralPath $case -Filter 'Parent-only-approval-*.json')
+  Check ($renewed.Count-eq1) 'Renewal creates one additional fixture approval without overwriting'
+  $renewal=Get-Content -LiteralPath $renewed[0].FullName -Raw|ConvertFrom-Json
+  $first=$grantText|ConvertFrom-Json;$second=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($renewal.payload))|ConvertFrom-Json
+  Check ($first.operationId-ceq$second.operationId) 'Approval renewal retains the same operation despite timestamp JSON conversion'
+ }finally{Remove-Item Function:\Read-Host}
  Check ((Get-FileHash -LiteralPath (Join-Path $case 'operator-transport.dpapi')).Hash-ceq$privateHash) 'Operator case private bytes unchanged'
  Write-Output "PASS: $count Parent recovery operator regressions. Ephemeral fixtures only; no live signer, pepper, Auth, device or production writes."
 }finally{

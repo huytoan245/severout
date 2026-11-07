@@ -6,6 +6,11 @@ function Write-RecoveryNewFile([string]$Path,[byte[]]$Bytes){
 }
 function Get-RecoveryBase64Url([byte[]]$Bytes){[Convert]::ToBase64String($Bytes).TrimEnd('=').Replace('+','-').Replace('/','_')}
 function Get-RecoveryDigest([string]$Value){Get-RecoveryBase64Url ([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($Value)))}
+function Get-RecoveryJsonString([string]$Raw,[string]$Property){
+    # ConvertFrom-Json can coerce Firestore revisions into DateTime, losing their exact wire value.
+    $document=[Text.Json.JsonDocument]::Parse($Raw)
+    try{return $document.RootElement.GetProperty($Property).GetString()}finally{$document.Dispose()}
+}
 function Read-RecoveryPrivateRsa([string]$Directory){
     if(-not $IsWindows){throw 'Local Windows DPAPI operator required'}
     $bytes=[Security.Cryptography.ProtectedData]::Unprotect([IO.File]::ReadAllBytes((Join-Path $Directory 'operator-transport.dpapi')),$null,[Security.Cryptography.DataProtectionScope]::CurrentUser)
@@ -29,7 +34,9 @@ function Test-RecoveryReport([string]$Directory,[string]$EncryptedReport,[string
     if($report.format-cne'FL233-PARENT-INSPECTION-1'-or$report.role-cne'parent'-or$report.package-cne'com.family.parent'-or$report.signer-cne'62b909ff3c5e6b56565cfe2814913778acdf694f32a042f12bc05c35404ed63f'-or$report.material-cnotmatch'^[A-Za-z0-9_-]{43}$'-or$report.keyPresent-isnot[bool]-or$report.keyUsable-isnot[bool]){throw 'Report scope/signature metadata invalid'}
     $age=[DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()-[long]$report.collectedAt
     if($age-lt-300000-or$age-gt86400000){throw 'Report age invalid; inspect phone clock or generate a fresh report'}
-    $family=(Get-Content -LiteralPath (Join-Path $SnapshotDirectory 'family.private.json') -Raw|ConvertFrom-Json)
+    $familyRaw=Get-Content -LiteralPath (Join-Path $SnapshotDirectory 'family.private.json') -Raw
+    $family=$familyRaw|ConvertFrom-Json
+    $family.updateTime=Get-RecoveryJsonString $familyRaw 'updateTime'
     $summary=Get-Content -LiteralPath (Join-Path $SnapshotDirectory 'READONLY-SUMMARY.json') -Raw|ConvertFrom-Json
     if(-not$summary.parentSlotPresent-or-not$summary.childSlotPresent-or-not$summary.parentBindingPresent-or$summary.schema-ne232-or$summary.parentAuthAccountExists-ne$true-or$summary.parentAuthDisabled-ne$false){throw 'Family/Auth backup prerequisite failed'}
     if($null-ne$report.uid -and ($report.uid-isnot[string]-or$report.uid.Length-lt1-or$report.uid.Length-gt128)){throw 'Invalid report Auth metadata'}
