@@ -1,5 +1,5 @@
 #requires -Version 7.2
-param([Parameter(Mandatory)][string]$Directory,[Parameter(Mandatory)][string]$EncryptedReport,[Parameter(Mandatory)][string]$SnapshotDirectory,[switch]$ConfirmOriginalPhoneProfile,[string]$ExpectedRevision,[long]$ExpectedEpoch=0,[long]$ExpectedGeneration=-1,[string]$PepperPath='C:\Users\Admin\Documents\FamilyLocation-ServerCredentials\device-binding-pepper.v232.dpapi')
+param([Parameter(Mandatory)][string]$Directory,[Parameter(Mandatory)][string]$EncryptedReport,[Parameter(Mandatory)][string]$SnapshotDirectory,[switch]$ConfirmOriginalPhoneProfile,[string]$ExpectedRevision,[long]$ExpectedEpoch=0,[long]$ExpectedGeneration=-1,[string]$PreviousEncryptedReport,[string]$PepperPath='C:\Users\Admin\Documents\FamilyLocation-ServerCredentials\device-binding-pepper.v232.dpapi')
 $ErrorActionPreference='Stop'
 . (Join-Path $PSScriptRoot 'ParentRecovery.Common.ps1')
 $checked=Test-RecoveryReport $Directory $EncryptedReport $SnapshotDirectory $PepperPath
@@ -8,11 +8,9 @@ $summaryRaw=Get-Content -LiteralPath (Join-Path $SnapshotDirectory 'READONLY-SUM
 $checkedAt=[DateTimeOffset]::Parse((Get-RecoveryJsonString $summaryRaw 'checkedAt'),[Globalization.CultureInfo]::InvariantCulture)
 if(-not$ConfirmOriginalPhoneProfile-or([DateTimeOffset]::UtcNow-$checkedAt).TotalMinutes-gt5-or$checkedAt-gt[DateTimeOffset]::UtcNow.AddMinutes(1)){throw 'Fresh read-only backup and explicit same-phone/profile confirmation required'}
 if(-not$ExpectedRevision-or$checked.Safe.revision-cne$ExpectedRevision-or$checked.Safe.epoch-ne$ExpectedEpoch-or$checked.Safe.generation-ne$ExpectedGeneration){throw 'STOP: production differs from the explicitly reviewed revision/epoch/generation; never silently rebase approval'}
-[pscustomobject]$checked.Safe|Select-Object bindingMatch,authPresent,authMatchesParent,authMatchesChild,keyPresent,keyUsable,rolesDistinct,revision,epoch,generation|ConvertTo-Json|Write-Host
-Write-Host 'STOP until explicit approval: Parent-only new Anonymous UID/key, exact-snapshot rebind and epoch increment. No Child/history changes. Backend guard deployment requires separate approval.'
-if((Read-Host 'Type APPROVE_PARENT_ONLY_REBIND only after reviewing this scope')-cne'APPROVE_PARENT_ONLY_REBIND'){throw 'No approval; nothing issued'}
 $now=[DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
 $operation=[guid]::NewGuid().ToString();$target=Join-Path $Directory 'Parent-only-approval.json'
+if($PreviousEncryptedReport-and-not(Test-Path -LiteralPath $target)){throw 'Original approval missing; cannot resume an existing operation'}
 if(Test-Path -LiteralPath $target){
  $previous=Get-Content -LiteralPath $target -Raw|ConvertFrom-Json;$previousRaw=[Convert]::FromBase64String($previous.payload)
  $reader=Read-RecoveryPrivateRsa $Directory
@@ -20,9 +18,21 @@ if(Test-Path -LiteralPath $target){
  $previousText=[Text.Encoding]::UTF8.GetString($previousRaw)
  $previousScope=$previousText|ConvertFrom-Json
  $previousScope.revision=Get-RecoveryJsonString $previousText 'revision'
- if($previousScope.reportHash-cne$checked.Safe.reportHash-or$previousScope.revision-cne$checked.Safe.revision-or$previousScope.epoch-ne$checked.Safe.epoch-or$previousScope.generation-ne$checked.Safe.generation){throw 'Existing operation no longer matches this report/snapshot; review without replacing identity'}
+ if($previousScope.scope-cne'PARENT_ONLY_REBIND'-or$previousScope.bindingMatched-ne$true-or$previousScope.revision-cne$checked.Safe.revision-or$previousScope.epoch-ne$checked.Safe.epoch-or$previousScope.generation-ne$checked.Safe.generation-or$previousScope.oldParentUidHash-cne(Get-RecoveryDigest $checked.Family.fields.parentUid.stringValue)){throw 'Existing operation no longer matches this report/snapshot; review without replacing identity'}
+ if($previousScope.reportHash-cne$checked.Safe.reportHash){
+  # A failed import may follow Activity recreation, which refreshes inspection.
+  # Re-verify both encrypted reports against the same exact production snapshot;
+  # preserve the signed operation, device material, absent key and local Auth state.
+  if(-not$PreviousEncryptedReport){throw 'Refreshed report requires the original encrypted report; no approval issued'}
+  $prior=Test-RecoveryReport $Directory $PreviousEncryptedReport $SnapshotDirectory $PepperPath
+  $oldReport=$prior.Raw|ConvertFrom-Json;$newReport=$checked.Raw|ConvertFrom-Json
+  if(-not$prior.Safe.eligibleForReview-or$previousScope.reportHash-cne$prior.Safe.reportHash-or$previousScope.materialHash-cne(Get-RecoveryDigest $oldReport.material)-or$previousScope.materialHash-cne(Get-RecoveryDigest $newReport.material)-or$oldReport.uid-cne$newReport.uid-or$oldReport.keyPresent-or$newReport.keyPresent){throw 'Refreshed report changed identity or binding; no approval issued'}
+ }
  $operation=$previousScope.operationId;$target=Join-Path $Directory "Parent-only-approval-$now.json"
 }
+[pscustomobject]$checked.Safe|Select-Object bindingMatch,authPresent,authMatchesParent,authMatchesChild,keyPresent,keyUsable,rolesDistinct,revision,epoch,generation|ConvertTo-Json|Write-Host
+Write-Host 'STOP until explicit approval: Parent-only new Anonymous UID/key, exact-snapshot rebind and epoch increment. No Child/history changes. Backend guard deployment requires separate approval.'
+if((Read-Host 'Type APPROVE_PARENT_ONLY_REBIND only after reviewing this scope')-cne'APPROVE_PARENT_ONLY_REBIND'){throw 'No approval; nothing issued'}
 $inspected=$checked.Raw|ConvertFrom-Json
 $payload=[ordered]@{scope='PARENT_ONLY_REBIND';reportHash=$checked.Safe.reportHash;materialHash=(Get-RecoveryDigest $inspected.material);bindingMatched=$true;issuedAt=$now;expiresAt=$now+1800000;revision=$checked.Safe.revision;epoch=$checked.Safe.epoch;generation=$checked.Safe.generation;operationId=$operation;oldParentUidHash=(Get-RecoveryDigest $checked.Family.fields.parentUid.stringValue)}
 $raw=[Text.Encoding]::UTF8.GetBytes(($payload|ConvertTo-Json -Compress))

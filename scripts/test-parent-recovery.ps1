@@ -76,6 +76,17 @@ try{
   $renewal=Get-Content -LiteralPath $renewed[0].FullName -Raw|ConvertFrom-Json
   $first=$grantText|ConvertFrom-Json;$second=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($renewal.payload))|ConvertFrom-Json
   Check ($first.operationId-ceq$second.operationId) 'Approval renewal retains the same operation despite timestamp JSON conversion'
+  $originalReport=Join-Path $root 'original-encrypted.json';Copy-Item -LiteralPath $reportPath -Destination $originalReport
+  $report.reportId=[guid]::NewGuid().ToString();WriteEnvelope
+  Reject {& (Join-Path $PSScriptRoot 'approve-parent-recovery.ps1') @approveArgs} 'Refreshed report cannot silently replace an approved report'
+  Reject {& (Join-Path $PSScriptRoot 'approve-parent-recovery.ps1') @approveArgs -PreviousEncryptedReport $reportPath} 'Wrong previous encrypted report cannot authorize refreshed inspection'
+  & (Join-Path $PSScriptRoot 'approve-parent-recovery.ps1') @approveArgs -PreviousEncryptedReport $originalReport|Out-Null
+  $replacement=Get-ChildItem -LiteralPath $case -Filter 'Parent-only-approval-*.json'|Sort-Object Name|Select-Object -Last 1
+  $replacementEnvelope=Get-Content -LiteralPath $replacement.FullName -Raw|ConvertFrom-Json
+  $replacementScope=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($replacementEnvelope.payload))|ConvertFrom-Json
+  Check ($replacementScope.operationId-ceq$first.operationId-and$replacementScope.reportHash-ceq(Test-RecoveryReport $case $reportPath $snapshot $pepperPath).Safe.reportHash) 'Verified refreshed report retains original operation and binds the new exact report'
+  $report.uid=$null;WriteEnvelope
+  Reject {& (Join-Path $PSScriptRoot 'approve-parent-recovery.ps1') @approveArgs -PreviousEncryptedReport $originalReport} 'Changed local Auth cannot renew a refreshed-report approval'
  }finally{Remove-Item Function:\Read-Host}
  Check ((Get-FileHash -LiteralPath (Join-Path $case 'operator-transport.dpapi')).Hash-ceq$privateHash) 'Operator case private bytes unchanged'
  Write-Output "PASS: $count Parent recovery operator regressions. Ephemeral fixtures only; no live signer, pepper, Auth, device or production writes."
